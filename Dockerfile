@@ -27,6 +27,7 @@ RUN python3.10 -m pip install --upgrade pip && \
     decord \
     opencv-python==4.6.0.66 \
     paddleocr \
+    "paddlex[ocr]==3.3.10" \
     pdf2image==1.16.3 \
     reportlab==4.0.4 \
     pdfplumber \
@@ -35,7 +36,8 @@ RUN python3.10 -m pip install --upgrade pip && \
     PyMuPDF \
     flask \
     waitress \
-    google-generativeai
+    google-generativeai \
+    scikit-learn
 
 # Configurar directorio de trabajo
 WORKDIR /app

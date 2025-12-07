@@ -4971,6 +4971,767 @@ def api_dictionary_available():
 
 
 # ============================================================================
+# PP-STRUCTURE: ANÁLISIS AVANZADO DE DOCUMENTOS
+# Layout Analysis + Table Recognition (SLANet)
+# ============================================================================
+
+# Variables globales para pipelines PP-Structure (lazy loading)
+pp_table_pipeline = None
+pp_layout_pipeline = None
+pp_structure_initialized = False
+
+def init_pp_structure_pipelines(force_reinit=False):
+    """
+    Inicializa los pipelines de PP-Structure bajo demanda.
+
+    Args:
+        force_reinit: Si True, fuerza reinicialización aunque ya estén cargados
+    """
+    global pp_table_pipeline, pp_layout_pipeline, pp_structure_initialized
+
+    if pp_structure_initialized and not force_reinit:
+        return True
+
+    try:
+        from paddlex import create_pipeline
+
+        if force_reinit:
+            logger.info("[PP-STRUCTURE] Forzando reinicialización de pipelines...")
+            pp_structure_initialized = False
+            pp_table_pipeline = None
+            pp_layout_pipeline = None
+
+        logger.info("[PP-STRUCTURE] Inicializando pipelines...")
+
+        # Pipeline para reconocimiento de tablas (SLANet)
+        logger.info("[PP-STRUCTURE] Cargando table_recognition...")
+        pp_table_pipeline = create_pipeline(pipeline='table_recognition')
+
+        # Pipeline para análisis de layout
+        logger.info("[PP-STRUCTURE] Cargando layout_parsing...")
+        pp_layout_pipeline = create_pipeline(pipeline='layout_parsing')
+
+        pp_structure_initialized = True
+        logger.info("[PP-STRUCTURE] Pipelines inicializados correctamente")
+        return True
+
+    except Exception as e:
+        logger.error(f"[PP-STRUCTURE] Error inicializando pipelines: {e}")
+        pp_structure_initialized = False
+        return False
+
+
+def run_pp_structure_with_retry(pipeline, file_path, max_retries=2):
+    """
+    Ejecuta un pipeline de PP-Structure con manejo de errores std::exception.
+
+    Si falla con std::exception, reintenta reinicializando el pipeline.
+
+    Args:
+        pipeline: El pipeline a ejecutar ('table' o 'layout')
+        file_path: Ruta al archivo a procesar
+        max_retries: Número máximo de reintentos
+
+    Returns:
+        Lista de resultados o None si falla
+    """
+    global pp_table_pipeline, pp_layout_pipeline
+
+    for attempt in range(max_retries + 1):
+        try:
+            if pipeline == 'table':
+                pp = pp_table_pipeline
+            else:
+                pp = pp_layout_pipeline
+
+            if pp is None:
+                logger.warning(f"[PP-STRUCTURE] Pipeline {pipeline} no inicializado, inicializando...")
+                if not init_pp_structure_pipelines(force_reinit=True):
+                    return None
+                pp = pp_table_pipeline if pipeline == 'table' else pp_layout_pipeline
+
+            results = list(pp.predict(file_path))
+            return results
+
+        except Exception as e:
+            error_str = str(e)
+
+            # Detectar errores de tipo std::exception u otros errores de C++
+            is_cpp_error = 'std::exception' in error_str or 'Segmentation' in error_str
+
+            if is_cpp_error and attempt < max_retries:
+                logger.warning(f"[PP-STRUCTURE] Error C++ detectado (intento {attempt + 1}/{max_retries + 1}): {error_str}")
+                logger.info("[PP-STRUCTURE] Reinicializando pipelines...")
+
+                # Forzar reinicialización
+                if init_pp_structure_pipelines(force_reinit=True):
+                    logger.info("[PP-STRUCTURE] Pipelines reinicializados, reintentando...")
+                    continue
+                else:
+                    logger.error("[PP-STRUCTURE] No se pudieron reinicializar los pipelines")
+                    return None
+            else:
+                logger.error(f"[PP-STRUCTURE] Error fatal (intento {attempt + 1}): {error_str}")
+                return None
+
+    return None
+
+
+@app.route('/structure', methods=['POST'])
+def structure():
+    """
+    Endpoint avanzado de análisis estructural de documentos.
+    Usa PP-Structure para:
+    - Detectar regiones del documento (tablas, texto, imágenes)
+    - Extraer tablas como HTML estructurado
+    - Proporcionar coordenadas de cada región
+
+    Parámetros:
+        file: Archivo PDF o imagen
+        extract_tables: bool - Extraer tablas como HTML (default: true)
+        extract_layout: bool - Detectar regiones del layout (default: true)
+
+    Retorna JSON estructurado con:
+        - layout_regions: Lista de regiones detectadas
+        - tables: Lista de tablas con HTML y datos
+        - ocr_text: Texto completo extraído
+        - metadata: Información del documento
+    """
+    global server_stats
+    start_time = time.time()
+    server_stats['total_requests'] += 1
+
+    temp_file_path = None
+
+    try:
+        # Validar archivo
+        if 'file' not in request.files:
+            server_stats['failed_requests'] += 1
+            return jsonify({'error': 'No file provided'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            server_stats['failed_requests'] += 1
+            return jsonify({'error': 'Empty filename'}), 400
+
+        # Validar extensión
+        ext = Path(file.filename).suffix.lower()
+        if ext not in ['.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']:
+            server_stats['failed_requests'] += 1
+            return jsonify({'error': f'Unsupported file format: {ext}'}), 400
+
+        # Obtener parámetros
+        extract_tables = request.form.get('extract_tables', 'true').lower() == 'true'
+        extract_layout = request.form.get('extract_layout', 'true').lower() == 'true'
+
+        # Inicializar pipelines si es necesario
+        if not init_pp_structure_pipelines():
+            server_stats['failed_requests'] += 1
+            return jsonify({'error': 'PP-Structure pipelines not available'}), 503
+
+        # Guardar archivo temporal
+        n8nHomeDir = '/home/n8n'
+        os.makedirs(f"{n8nHomeDir}/in", exist_ok=True)
+
+        temp_filename = f"struct_{int(time.time())}_{file.filename}"
+        temp_file_path = f"{n8nHomeDir}/in/{temp_filename}"
+        file.save(temp_file_path)
+
+        logger.info(f"[STRUCTURE] Procesando: {temp_filename}")
+
+        # Resultados
+        result = {
+            'success': True,
+            'filename': file.filename,
+            'pages': [],
+            'summary': {
+                'total_pages': 0,
+                'total_tables': 0,
+                'total_regions': 0,
+                'region_types': {}
+            }
+        }
+
+        # Procesar con layout_parsing (detecta regiones + tablas)
+        if extract_layout or extract_tables:
+            try:
+                # Usar función con reintentos para manejar std::exception
+                pipeline_type = 'table' if extract_tables else 'layout'
+                pipeline_results = run_pp_structure_with_retry(pipeline_type, temp_file_path)
+
+                if pipeline_results is None:
+                    server_stats['failed_requests'] += 1
+                    return jsonify({
+                        'error': 'PP-Structure pipeline failed after retries',
+                        'suggestion': 'Try again or use /process endpoint instead'
+                    }), 503
+
+                for page_idx, page_result in enumerate(pipeline_results):
+                    page_data = {
+                        'page_number': page_idx + 1,
+                        'regions': [],
+                        'tables': [],
+                        'ocr_texts': []
+                    }
+
+                    res = page_result.json.get('res', {})
+
+                    # Extraer regiones del layout
+                    layout_res = res.get('layout_det_res', {})
+                    if 'boxes' in layout_res:
+                        for box in layout_res['boxes']:
+                            region = {
+                                'type': box.get('label', 'unknown'),
+                                'confidence': round(box.get('score', 0), 3),
+                                'bbox': box.get('coordinate', [])
+                            }
+                            page_data['regions'].append(region)
+
+                            # Contar tipos de región
+                            rtype = region['type']
+                            if rtype not in result['summary']['region_types']:
+                                result['summary']['region_types'][rtype] = 0
+                            result['summary']['region_types'][rtype] += 1
+
+                    # Extraer OCR global
+                    ocr_res = res.get('overall_ocr_res', {})
+                    if 'rec_texts' in ocr_res:
+                        page_data['ocr_texts'] = ocr_res['rec_texts']
+
+                    # Extraer tablas con HTML
+                    if extract_tables:
+                        table_list = res.get('table_res_list', [])
+                        for table_idx, table in enumerate(table_list):
+                            table_data = {
+                                'table_number': table_idx + 1,
+                                'html': table.get('pred_html', ''),
+                                'cell_count': len(table.get('cell_box_list', [])),
+                                'cells': []
+                            }
+
+                            # Extraer info de celdas
+                            cell_boxes = table.get('cell_box_list', [])
+                            ocr_pred = table.get('table_ocr_pred', [])
+
+                            for i, cell_box in enumerate(cell_boxes[:50]):  # Limitar a 50 celdas
+                                cell = {
+                                    'bbox': cell_box,
+                                    'text': ''
+                                }
+                                # El texto de la celda se puede extraer del HTML
+                                table_data['cells'].append(cell)
+
+                            page_data['tables'].append(table_data)
+                            result['summary']['total_tables'] += 1
+
+                    result['pages'].append(page_data)
+                    result['summary']['total_regions'] += len(page_data['regions'])
+
+                result['summary']['total_pages'] = len(result['pages'])
+
+            except Exception as e:
+                logger.error(f"[STRUCTURE] Error en PP-Structure: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                result['pp_structure_error'] = str(e)
+
+        # Calcular tiempo de procesamiento
+        processing_time = time.time() - start_time
+        result['processing_time'] = round(processing_time, 2)
+
+        server_stats['successful_requests'] += 1
+        server_stats['total_processing_time'] += processing_time
+
+        logger.info(f"[STRUCTURE] Completado en {processing_time:.2f}s - {result['summary']['total_tables']} tablas, {result['summary']['total_regions']} regiones")
+
+        return jsonify(result)
+
+    except Exception as e:
+        server_stats['failed_requests'] += 1
+        logger.error(f"[STRUCTURE ERROR] {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        # Limpiar archivo temporal
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except:
+                pass
+
+
+@app.route('/extract', methods=['POST'])
+def extract():
+    """
+    Endpoint de extracción inteligente para facturas y tickets.
+    Combina PP-Structure con heurísticas para extraer campos clave.
+
+    Parámetros:
+        file: Archivo PDF o imagen
+        document_type: Tipo de documento (invoice, ticket, receipt) - auto-detecta si no se especifica
+
+    Retorna JSON estructurado con:
+        - document_type: Tipo detectado
+        - fields: Campos extraídos (vendor, date, total, etc.)
+        - tables: Tablas detectadas con datos estructurados
+        - raw_text: Texto completo
+        - confidence: Nivel de confianza de la extracción
+    """
+    global server_stats
+    start_time = time.time()
+    server_stats['total_requests'] += 1
+
+    temp_file_path = None
+
+    try:
+        # Validar archivo
+        if 'file' not in request.files:
+            server_stats['failed_requests'] += 1
+            return jsonify({'error': 'No file provided'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            server_stats['failed_requests'] += 1
+            return jsonify({'error': 'Empty filename'}), 400
+
+        ext = Path(file.filename).suffix.lower()
+        if ext not in ['.pdf', '.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif']:
+            server_stats['failed_requests'] += 1
+            return jsonify({'error': f'Unsupported file format: {ext}'}), 400
+
+        document_type = request.form.get('document_type', 'auto')
+
+        # Guardar archivo temporal
+        n8nHomeDir = '/home/n8n'
+        os.makedirs(f"{n8nHomeDir}/in", exist_ok=True)
+
+        temp_filename = f"extract_{int(time.time())}_{file.filename}"
+        temp_file_path = f"{n8nHomeDir}/in/{temp_filename}"
+        file.save(temp_file_path)
+
+        logger.info(f"[EXTRACT] Procesando: {temp_filename}, tipo: {document_type}")
+
+        raw_text = ""
+        ocr_blocks = []
+        extraction_method = "ocr"
+
+        # Para PDFs, intentar primero con pdftotext -layout (mejor para vectoriales)
+        if ext == '.pdf':
+            try:
+                import subprocess
+                # Intentar pdftotext con layout
+                result = subprocess.run(
+                    ['pdftotext', '-layout', temp_file_path, '-'],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    pdftotext_output = result.stdout.strip()
+                    # Verificar que no sea solo espacios/saltos de línea
+                    if len(pdftotext_output.replace('\n', '').replace(' ', '')) > 50:
+                        raw_text = pdftotext_output
+                        extraction_method = "pdftotext_layout"
+                        logger.info(f"[EXTRACT] Usando pdftotext -layout ({len(raw_text)} chars)")
+            except Exception as e:
+                logger.warning(f"[EXTRACT] pdftotext falló, usando OCR: {e}")
+
+        # Si pdftotext no funcionó (PDF escaneado o imagen), usar OCR
+        if not raw_text:
+            with app.test_request_context():
+                ocr_response = None
+                try:
+                    from flask import g
+                    with app.test_request_context(
+                        '/ocr',
+                        method='POST',
+                        data={'filename': temp_file_path}
+                    ):
+                        ocr_response = ocr()
+                except Exception as e:
+                    logger.error(f"[EXTRACT] Error llamando OCR interno: {e}")
+
+            if ocr_response and hasattr(ocr_response, 'get_json'):
+                ocr_data = ocr_response.get_json()
+                if ocr_data:
+                    raw_text = ocr_data.get('extracted_text', '')
+                    ocr_blocks = ocr_data.get('ocr_blocks', [])
+                    extraction_method = "ocr"
+                    logger.info(f"[EXTRACT] Usando OCR ({len(raw_text)} chars)")
+
+        # Aplicar correcciones de diccionario
+        if raw_text:
+            raw_text = apply_ocr_corrections(raw_text)
+
+        # Extraer campos usando heurísticas
+        fields = extract_invoice_fields(raw_text)
+
+        # Auto-detectar tipo de documento
+        if document_type == 'auto':
+            document_type = detect_document_type(raw_text, fields)
+
+        # Intentar obtener tablas con PP-Structure
+        tables = []
+        if init_pp_structure_pipelines():
+            try:
+                table_results = list(pp_table_pipeline.predict(temp_file_path))
+                for page_result in table_results:
+                    res = page_result.json.get('res', {})
+                    for table in res.get('table_res_list', []):
+                        tables.append({
+                            'html': table.get('pred_html', ''),
+                            'cell_count': len(table.get('cell_box_list', []))
+                        })
+            except Exception as e:
+                logger.warning(f"[EXTRACT] Error extrayendo tablas: {e}")
+
+        processing_time = time.time() - start_time
+
+        result = {
+            'success': True,
+            'document_type': document_type,
+            'extraction_method': extraction_method,
+            'fields': fields,
+            'tables': tables,
+            'raw_text': raw_text,
+            'processing_time': round(processing_time, 2),
+            'confidence': calculate_extraction_confidence(fields)
+        }
+
+        server_stats['successful_requests'] += 1
+        server_stats['total_processing_time'] += processing_time
+
+        logger.info(f"[EXTRACT] Completado en {processing_time:.2f}s - tipo: {document_type}, confianza: {result['confidence']}")
+
+        return jsonify(result)
+
+    except Exception as e:
+        server_stats['failed_requests'] += 1
+        logger.error(f"[EXTRACT ERROR] {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except:
+                pass
+
+
+def extract_invoice_fields(text):
+    """
+    Extrae campos clave de una factura/ticket usando regex y heurísticas.
+    """
+    import re
+
+    fields = {
+        'vendor': None,
+        'vendor_nif': None,
+        'invoice_number': None,
+        'date': None,
+        'total': None,
+        'tax_base': None,
+        'tax_rate': None,
+        'tax_amount': None,
+        'payment_method': None
+    }
+
+    if not text:
+        return fields
+
+    text_upper = text.upper()
+    lines = text.split('\n')
+
+    # NIF/CIF (patrón español) - formato: letra + 8 dígitos o 8 dígitos + letra
+    nif_patterns = [
+        r'(?:N\.?I\.?F\.?|C\.?I\.?F\.?)[:\s]*([A-Z]\d{8})',  # B12345678
+        r'(?:N\.?I\.?F\.?|C\.?I\.?F\.?)[:\s]*(\d{8}[A-Z])',  # 12345678A
+        r'(?:N\.?I\.?F\.?|C\.?I\.?F\.?)[:\s]*([A-Z]?\d{7,8}[A-Z]?)',  # Genérico
+    ]
+    for pattern in nif_patterns:
+        nif_match = re.search(pattern, text_upper)
+        if nif_match:
+            nif = nif_match.group(1)
+            # Corregir confusiones OCR comunes en NIFs
+            nif = nif.replace('R', 'B').replace('I', '1').replace('O', '0')
+            fields['vendor_nif'] = nif
+            break
+
+    # Número de factura
+    invoice_patterns = [
+        r'(?:N[°º]?\s*(?:FACTURA|FACT\.?)|FACTURA\s*N[°º]?)[:\s]*([A-Z0-9\-/]+)',
+        r'(?:INVOICE|INV)[:\s#]*([A-Z0-9\-/]+)',
+        r'N[°º]?\s*FACTURA[:\s]*(\d+)',
+    ]
+    for pattern in invoice_patterns:
+        match = re.search(pattern, text_upper)
+        if match:
+            fields['invoice_number'] = match.group(1).strip()
+            break
+
+    # Fecha
+    date_patterns = [
+        r'(?:FECHA)[:\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
+        r'(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})',
+        r'(\d{1,2}\s+(?:ENE|FEB|MAR|ABR|MAY|JUN|JUL|AGO|SEP|OCT|NOV|DIC)[A-Z]*\s+\d{2,4})',
+    ]
+    for pattern in date_patterns:
+        match = re.search(pattern, text_upper)
+        if match:
+            fields['date'] = match.group(1).strip()
+            break
+
+    # Total - buscar en múltiples formatos
+    # Formato 1: "TOTAL FACTURA: 94.74 €" o "TOTAL: 94.74"
+    # Formato 2: "Total Factura                           94.74 €" (espacios largos)
+    total_patterns = [
+        # Formato con espacios largos (PDFs vectoriales con layout)
+        r'TOTAL\s+FACTURA\s+(\d+[.,]\d{2})\s*€?',
+        r'TOTAL\s+A\s+PAGAR\s+(\d+[.,]\d{2})\s*€?',
+        # Formato tradicional con : o espacios cortos
+        r'(?:TOTAL\s*(?:FACTURA|A\s*PAGAR)?)[:\s]+(\d+[.,]\d{2})\s*€?',
+        r'(?:IMPORTE\s*TOTAL)[:\s]+(\d+[.,]\d{2})\s*€?',
+        # Genérico TOTAL seguido de número
+        r'TOTAL[:\s]+(\d+[.,]\d{2})\s*€?',
+    ]
+    for pattern in total_patterns:
+        match = re.search(pattern, text_upper)
+        if match:
+            total_str = match.group(1).replace(',', '.')
+            try:
+                fields['total'] = float(total_str)
+            except:
+                pass
+            break
+
+    # Si no encontramos total, buscar línea por línea
+    if not fields.get('total'):
+        for line in lines:
+            line_upper = line.upper().strip()
+            if 'TOTAL' in line_upper and 'FACTURA' in line_upper:
+                # Buscar número en la línea
+                amounts = re.findall(r'(\d+[.,]\d{2})\s*€?', line)
+                if amounts:
+                    try:
+                        fields['total'] = float(amounts[-1].replace(',', '.'))
+                    except:
+                        pass
+                    break
+
+    # Base imponible - múltiples formatos
+    base_patterns = [
+        # Formato con espacios largos
+        r'(?:TOTAL\s*)?(?:\(?\s*BASE\s*IMPONIBLE\s*\)?)\s+(\d+[.,]\d{2})\s*€?',
+        # Formato tradicional
+        r'(?:BASE\s*(?:IMPONIBLE)?)[:\s]+(\d+[.,]\d{2})\s*€?',
+        r'(?:SUBTOTAL)[:\s]+(\d+[.,]\d{2})\s*€?',
+    ]
+    for pattern in base_patterns:
+        match = re.search(pattern, text_upper)
+        if match:
+            base_str = match.group(1).replace(',', '.')
+            try:
+                fields['tax_base'] = float(base_str)
+            except:
+                pass
+            break
+
+    # Si no encontramos base, buscar línea por línea
+    if not fields.get('tax_base'):
+        for line in lines:
+            line_upper = line.upper().strip()
+            if 'BASE' in line_upper and 'IMPONIBLE' in line_upper:
+                amounts = re.findall(r'(\d+[.,]\d{2})\s*€?', line)
+                if amounts:
+                    try:
+                        fields['tax_base'] = float(amounts[-1].replace(',', '.'))
+                    except:
+                        pass
+                    break
+
+    # =========================================================================
+    # IVA - Extracción inteligente usando múltiples estrategias
+    # =========================================================================
+
+    # Estrategia 0: Buscar línea "IVA (21%)" con espacios largos y número al final
+    # Formato: "IVA (21%)                                                     16.44 €"
+    for line in lines:
+        line_upper = line.upper().strip()
+        # Buscar línea que contenga IVA y porcentaje
+        iva_line_match = re.search(r'IVA\s*\(?\s*(\d{1,2})\s*%\s*\)?', line_upper)
+        if iva_line_match:
+            # Extraer la tasa
+            if not fields.get('tax_rate'):
+                try:
+                    fields['tax_rate'] = float(iva_line_match.group(1))
+                except:
+                    pass
+            # Buscar el importe al final de la línea
+            amounts = re.findall(r'(\d+[.,]\d{2})\s*€?$', line_upper)
+            if amounts and not fields.get('tax_amount'):
+                try:
+                    fields['tax_amount'] = float(amounts[-1].replace(',', '.'))
+                except:
+                    pass
+            # Si encontramos ambos, salir
+            if fields.get('tax_rate') and fields.get('tax_amount'):
+                break
+
+    # Estrategia 1: Buscar patrón "IVA (21%)" o similar seguido de importe
+    if not fields.get('tax_amount'):
+        iva_with_amount = re.search(r'IVA\s*\(?(\d{1,2})\s*%?\)?[:\s]+(\d+[.,]\d{2})', text_upper)
+        if iva_with_amount:
+            try:
+                if not fields.get('tax_rate'):
+                    fields['tax_rate'] = float(iva_with_amount.group(1))
+                fields['tax_amount'] = float(iva_with_amount.group(2).replace(',', '.'))
+            except:
+                pass
+
+    # Estrategia 2: Buscar etiquetas en líneas separadas (formato típico de tickets)
+    if not fields.get('tax_amount'):
+        # Buscar líneas con etiquetas clave
+        text_lines = text.upper().split('\n')
+        for i, line in enumerate(text_lines):
+            line = line.strip()
+
+            # Buscar "%IVA" seguido de número en siguiente(s) línea(s)
+            if '%IVA' in line or ('IVA' in line and '(' not in line):
+                # Buscar número en la misma línea después de IVA
+                iva_same_line = re.search(r'(?:%?\s*IVA)[:\s]*(\d+[.,]\d{2})', line)
+                if iva_same_line:
+                    try:
+                        val = float(iva_same_line.group(1).replace(',', '.'))
+                        # Si es un porcentaje (4-21), es la tasa
+                        if 4 <= val <= 21:
+                            if not fields.get('tax_rate'):
+                                fields['tax_rate'] = val
+                        elif not fields.get('tax_amount'):
+                            fields['tax_amount'] = val
+                    except:
+                        pass
+
+                # Buscar en líneas siguientes
+                for j in range(i+1, min(i+4, len(text_lines))):
+                    next_line = text_lines[j].strip()
+                    # Si es solo un número, podría ser la tasa de IVA
+                    num_match = re.match(r'^(\d+)[.,](\d{2})$', next_line)
+                    if num_match:
+                        try:
+                            val = float(f"{num_match.group(1)}.{num_match.group(2)}")
+                            if 4 <= val <= 21 and not fields.get('tax_rate'):
+                                fields['tax_rate'] = val
+                            break
+                        except:
+                            pass
+
+            # Buscar "CUOTA" seguido de número (esto es el tax_amount)
+            if 'CUOTA' in line:
+                cuota_same_line = re.search(r'CUOTA[:\s]*(\d+[.,]\d{2})', line)
+                if cuota_same_line:
+                    try:
+                        fields['tax_amount'] = float(cuota_same_line.group(1).replace(',', '.'))
+                    except:
+                        pass
+                else:
+                    # Buscar en siguiente línea
+                    for j in range(i+1, min(i+3, len(text_lines))):
+                        next_line = text_lines[j].strip()
+                        num_match = re.match(r'^(\d+)[.,](\d{2})$', next_line)
+                        if num_match:
+                            try:
+                                fields['tax_amount'] = float(f"{num_match.group(1)}.{num_match.group(2)}")
+                                break
+                            except:
+                                pass
+
+    # Estrategia 3: Verificación cruzada usando base imponible
+    # Si tenemos base y total, podemos deducir el IVA
+    if fields.get('tax_base') and fields.get('total'):
+        calculated_tax = round(fields['total'] - fields['tax_base'], 2)
+
+        # Si no tenemos tax_amount o difiere mucho, usar el calculado
+        if not fields.get('tax_amount'):
+            fields['tax_amount'] = calculated_tax
+
+        # Si no tenemos tax_rate, deducirlo
+        if not fields.get('tax_rate') and fields['tax_base'] > 0:
+            calculated_rate = round(calculated_tax / fields['tax_base'] * 100, 0)
+            if calculated_rate in [4, 10, 21]:  # Tasas estándar de IVA en España
+                fields['tax_rate'] = calculated_rate
+
+    # Estrategia 4: Si tenemos base y tasa pero no monto, calcularlo
+    if fields.get('tax_base') and fields.get('tax_rate') and not fields.get('tax_amount'):
+        fields['tax_amount'] = round(fields['tax_base'] * fields['tax_rate'] / 100, 2)
+
+    # Estrategia 5: Validación final - verificar coherencia de valores
+    if fields.get('tax_base') and fields.get('tax_rate') and fields.get('tax_amount'):
+        expected_tax = round(fields['tax_base'] * fields['tax_rate'] / 100, 2)
+        # Si el tax_amount está muy lejos del esperado, recalcular
+        if abs(fields['tax_amount'] - expected_tax) > 1:
+            logger.warning(f"[KIE] tax_amount {fields['tax_amount']} difiere del esperado {expected_tax}")
+            # Mantener el extraído pero loguear la discrepancia
+
+    # Vendor (primera línea no vacía que parezca nombre de empresa)
+    for line in lines[:5]:
+        line = line.strip()
+        if len(line) > 5 and not any(x in line.upper() for x in ['FACTURA', 'NIF', 'CIF', 'FECHA', 'TOTAL']):
+            if re.search(r'S\.?L\.?U?\.?|S\.?A\.?|SOCIEDAD|EMPRESA', line.upper()):
+                fields['vendor'] = line
+                break
+            elif not fields['vendor'] and len(line) > 10:
+                fields['vendor'] = line
+
+    return fields
+
+
+def detect_document_type(text, fields):
+    """Detecta el tipo de documento basándose en el contenido"""
+    text_upper = text.upper()
+
+    if 'FACTURA' in text_upper or fields.get('invoice_number'):
+        return 'invoice'
+    elif 'TICKET' in text_upper or 'RECIBO' in text_upper:
+        return 'receipt'
+    elif 'ALBARÁN' in text_upper or 'ALBARAN' in text_upper:
+        return 'delivery_note'
+    elif fields.get('total') and fields.get('vendor_nif'):
+        return 'invoice'
+    else:
+        return 'unknown'
+
+
+def calculate_extraction_confidence(fields):
+    """Calcula un score de confianza basado en campos extraídos"""
+    required_fields = ['vendor', 'total', 'date']
+    optional_fields = ['vendor_nif', 'invoice_number', 'tax_base', 'tax_rate']
+
+    score = 0
+    max_score = len(required_fields) * 2 + len(optional_fields)
+
+    for field in required_fields:
+        if fields.get(field):
+            score += 2
+
+    for field in optional_fields:
+        if fields.get(field):
+            score += 1
+
+    confidence = round(score / max_score, 2)
+
+    if confidence >= 0.8:
+        return {'score': confidence, 'level': 'high'}
+    elif confidence >= 0.5:
+        return {'score': confidence, 'level': 'medium'}
+    else:
+        return {'score': confidence, 'level': 'low'}
+
+
+# ============================================================================
 # FIN DE CAPA API REST AÑADIDA
 # ============================================================================
 

@@ -192,3 +192,46 @@ Requires CPU with **AVX/AVX2** support. Will fail with `Illegal instruction (cor
 - Subsequent requests: 1-2 seconds
 - All new endpoints should call `/ocr` internally to avoid duplicating processing logic
 - Original `/ocr` endpoint must remain unchanged for n8n compatibility
+
+---
+
+## ROADMAP: Hacia la Perfección (v4.0)
+
+**IMPORTANTE:** Ver `ROADMAP_PERFECTION.md` para el plan completo de mejoras.
+
+### Objetivo
+Transformar el OCR básico en un **Sistema de Inteligencia Documental** que:
+1. Detecte regiones del documento (Layout Analysis)
+2. Reconozca estructura de tablas (SLANet)
+3. Extraiga campos clave de facturas (KIE)
+4. Devuelva JSON estructurado
+
+### Fases de Implementación
+
+| Fase | Descripción | Estado |
+|------|-------------|--------|
+| 1 | Instalar dependencias PP-Structure | PENDIENTE |
+| 2 | Layout Analysis Pipeline | PENDIENTE |
+| 3 | Table Recognition (SLANet) | PENDIENTE |
+| 4 | Mejorar format_text_with_layout | PENDIENTE |
+| 5 | Key Information Extraction | PENDIENTE |
+| 6 | Endpoint /extract estructurado | PENDIENTE |
+
+### Archivos de Referencia
+- `ROADMAP_PERFECTION.md` - Plan detallado con código y arquitectura
+- `INVESTIGATION_NOTES.md` - Notas técnicas del fix de Layout
+- `.claude/SESSION_CONTEXT.md` - Contexto rápido para sesiones largas
+
+### Facturas de Prueba
+```
+/mnt/c/PROYECTOS CLAUDE/paddleocr/facturas_prueba/
+├── Factura noviembre.pdf     # PDF vectorial (Layout funciona bien)
+├── ticket.pdf                # Escaneado (PROBLEMA: tablas destruidas)
+├── CamScanner*.pdf           # Escaneado (PROBLEMA: OCR con errores)
+└── Factura_VFR*.pdf          # Otro formato de factura
+```
+
+### Criterio de Éxito
+- **Tickets escaneados:** Extracción de Total con >95% precisión
+- **Tablas:** Estructura HTML válida, datos en JSON
+- **Campos KIE:** NIF, Fecha, Total extraídos correctamente
