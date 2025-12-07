@@ -2711,7 +2711,7 @@ def dashboard():
 <!DOCTYPE html>
 <html>
 <head>
-    <title>PaddleOCR Fusion v3 - Dashboard</title>
+    <title>PaddleOCR Fusion v4 - Dashboard</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
@@ -2805,7 +2805,7 @@ def dashboard():
 </head>
 <body>
     <div class="container">
-        <h1>PaddleOCR Fusion v3</h1>
+        <h1>PaddleOCR Fusion v4</h1>
 
         <!-- Tabs -->
         <div class="tabs">
