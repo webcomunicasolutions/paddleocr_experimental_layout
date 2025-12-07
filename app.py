@@ -5591,6 +5591,9 @@ def extract():
         # Extraer campos usando heurísticas
         fields = extract_invoice_fields(raw_text)
 
+        # Aplicar normalización v4.3
+        fields = normalize_fields(fields)
+
         # Auto-detectar tipo de documento
         if document_type == 'auto':
             document_type = detect_document_type(raw_text, fields)
@@ -6176,6 +6179,318 @@ def extract_invoice_fields(text):
     fields['line_items'] = unique_items[:30]  # Limitar a 30 items máximo
 
     return fields
+
+
+# =========================================================================
+# v4.3 - FUNCIONES DE NORMALIZACIÓN Y VALIDACIÓN
+# =========================================================================
+
+def normalize_date(date_str):
+    """
+    Normaliza cualquier formato de fecha español a DD-MM-YYYY.
+
+    Formatos soportados:
+    - DD-MM-YY / DD/MM/YY → DD-MM-YYYY (asume 20XX para años < 50, 19XX para >= 50)
+    - DD-MM-YYYY / DD/MM/YYYY → DD-MM-YYYY
+    - DD MMM YYYY (ej: "05 NOV 2025") → DD-MM-YYYY
+
+    Returns:
+        dict: {'original': str, 'normalized': str, 'valid': bool}
+    """
+    import re
+
+    if not date_str:
+        return {'original': None, 'normalized': None, 'valid': False}
+
+    date_str = date_str.strip().upper()
+    result = {'original': date_str, 'normalized': None, 'valid': False}
+
+    # Meses en español
+    months_es = {
+        'ENE': '01', 'ENERO': '01',
+        'FEB': '02', 'FEBRERO': '02',
+        'MAR': '03', 'MARZO': '03',
+        'ABR': '04', 'ABRIL': '04',
+        'MAY': '05', 'MAYO': '05',
+        'JUN': '06', 'JUNIO': '06',
+        'JUL': '07', 'JULIO': '07',
+        'AGO': '08', 'AGOSTO': '08',
+        'SEP': '09', 'SEPT': '09', 'SEPTIEMBRE': '09',
+        'OCT': '10', 'OCTUBRE': '10',
+        'NOV': '11', 'NOVIEMBRE': '11',
+        'DIC': '12', 'DICIEMBRE': '12'
+    }
+
+    try:
+        # Formato 1: DD-MM-YY o DD/MM/YY (año corto)
+        match = re.match(r'^(\d{1,2})[-/](\d{1,2})[-/](\d{2})$', date_str)
+        if match:
+            day, month, year = match.groups()
+            year_int = int(year)
+            # Asumir 2000-2049 para 00-49, 1950-1999 para 50-99
+            full_year = 2000 + year_int if year_int < 50 else 1900 + year_int
+            result['normalized'] = f"{day.zfill(2)}-{month.zfill(2)}-{full_year}"
+            result['valid'] = True
+            return result
+
+        # Formato 2: DD-MM-YYYY o DD/MM/YYYY (año completo)
+        match = re.match(r'^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$', date_str)
+        if match:
+            day, month, year = match.groups()
+            result['normalized'] = f"{day.zfill(2)}-{month.zfill(2)}-{year}"
+            result['valid'] = True
+            return result
+
+        # Formato 3: DD MMM YYYY (ej: "05 NOV 2025")
+        match = re.match(r'^(\d{1,2})\s+([A-Z]+)\s+(\d{4})$', date_str)
+        if match:
+            day, month_name, year = match.groups()
+            # Buscar el mes en el diccionario
+            for key, value in months_es.items():
+                if month_name.startswith(key):
+                    result['normalized'] = f"{day.zfill(2)}-{value}-{year}"
+                    result['valid'] = True
+                    return result
+
+        # Formato 4: DD de MMM de YYYY (ej: "05 de noviembre de 2025")
+        match = re.match(r'^(\d{1,2})\s+(?:DE\s+)?([A-Z]+)\s+(?:DE\s+)?(\d{4})$', date_str)
+        if match:
+            day, month_name, year = match.groups()
+            for key, value in months_es.items():
+                if month_name.startswith(key):
+                    result['normalized'] = f"{day.zfill(2)}-{value}-{year}"
+                    result['valid'] = True
+                    return result
+
+    except Exception as e:
+        pass
+
+    return result
+
+
+def validate_spanish_nif(nif):
+    """
+    Valida un NIF/CIF español verificando el formato y dígito de control.
+
+    Tipos soportados:
+    - NIF persona física: 8 dígitos + letra (ej: 12345678Z)
+    - NIE: X/Y/Z + 7 dígitos + letra (ej: X1234567L)
+    - CIF empresa: letra + 8 dígitos (ej: B12345678) - la letra final puede ser número o letra
+
+    Returns:
+        dict: {'original': str, 'formatted': str, 'valid': bool, 'type': str, 'control_check': bool}
+    """
+    import re
+
+    if not nif:
+        return {'original': None, 'formatted': None, 'valid': False, 'type': None, 'control_check': False}
+
+    nif = nif.strip().upper()
+    result = {'original': nif, 'formatted': nif, 'valid': False, 'type': None, 'control_check': False}
+
+    # Limpiar caracteres no alfanuméricos
+    nif_clean = re.sub(r'[^A-Z0-9]', '', nif)
+
+    # Tabla de letras para NIF persona física
+    nif_letters = 'TRWAGMYFPDXBNJZSQVHLCKE'
+
+    # NIF persona física: 8 dígitos + letra
+    if re.match(r'^\d{8}[A-Z]$', nif_clean):
+        result['type'] = 'NIF'
+        result['formatted'] = nif_clean
+        digits = int(nif_clean[:8])
+        expected_letter = nif_letters[digits % 23]
+        actual_letter = nif_clean[8]
+        result['control_check'] = (expected_letter == actual_letter)
+        result['valid'] = result['control_check']
+        return result
+
+    # NIE (extranjeros): X/Y/Z + 7 dígitos + letra
+    if re.match(r'^[XYZ]\d{7}[A-Z]$', nif_clean):
+        result['type'] = 'NIE'
+        result['formatted'] = nif_clean
+        # Convertir primera letra a número: X=0, Y=1, Z=2
+        nie_map = {'X': '0', 'Y': '1', 'Z': '2'}
+        nie_number = int(nie_map[nif_clean[0]] + nif_clean[1:8])
+        expected_letter = nif_letters[nie_number % 23]
+        actual_letter = nif_clean[8]
+        result['control_check'] = (expected_letter == actual_letter)
+        result['valid'] = result['control_check']
+        return result
+
+    # CIF empresa: letra + 7 dígitos + control (letra o número)
+    if re.match(r'^[ABCDEFGHJKLMNPQRSUVW]\d{7}[A-J0-9]$', nif_clean):
+        result['type'] = 'CIF'
+        result['formatted'] = nif_clean
+        result['valid'] = True  # Formato válido
+
+        # Cálculo del dígito de control del CIF (algoritmo estándar)
+        try:
+            tipo = nif_clean[0]
+            digits = nif_clean[1:8]
+            control = nif_clean[8]
+
+            # Suma de pares
+            suma_pares = sum(int(digits[i]) for i in [1, 3, 5])
+
+            # Suma de impares (multiplicar por 2 y sumar dígitos)
+            suma_impares = 0
+            for i in [0, 2, 4, 6]:
+                doble = int(digits[i]) * 2
+                suma_impares += doble if doble < 10 else doble - 9
+
+            total = suma_pares + suma_impares
+            control_digit = (10 - (total % 10)) % 10
+            control_letter = 'JABCDEFGHI'[control_digit]
+
+            # Según el tipo de entidad, el control puede ser letra o número
+            # Tipos que usan letra: K, P, Q, S (y N, W a veces)
+            # Tipos que usan número: A, B (resto)
+            if control.isdigit():
+                result['control_check'] = (int(control) == control_digit)
+            else:
+                result['control_check'] = (control == control_letter)
+
+        except Exception:
+            pass
+
+        return result
+
+    # Si tiene formato de CIF pero el control no es correcto, aún lo marcamos como CIF
+    if re.match(r'^[A-Z]\d{8}$', nif_clean):
+        result['type'] = 'CIF'
+        result['formatted'] = nif_clean
+        result['valid'] = True  # Formato válido pero sin verificar control
+        return result
+
+    return result
+
+
+def normalize_amount(amount):
+    """
+    Normaliza un importe a formato estándar float con 2 decimales.
+
+    Formatos soportados:
+    - "94,74 €" → 94.74
+    - "94.74 EUR" → 94.74
+    - "1.234,56" → 1234.56 (formato español con miles)
+    - "-12.3967 €" → -12.40 (redondeo a 2 decimales)
+
+    Returns:
+        dict: {'original': any, 'normalized': float, 'formatted': str, 'valid': bool}
+    """
+    import re
+
+    if amount is None:
+        return {'original': None, 'normalized': None, 'formatted': None, 'valid': False}
+
+    # Si ya es float, normalizar
+    if isinstance(amount, (int, float)):
+        normalized = round(float(amount), 2)
+        return {
+            'original': amount,
+            'normalized': normalized,
+            'formatted': f"{normalized:.2f}",
+            'valid': True
+        }
+
+    result = {'original': amount, 'normalized': None, 'formatted': None, 'valid': False}
+
+    try:
+        amount_str = str(amount).strip()
+
+        # Eliminar símbolos de moneda y espacios
+        amount_clean = re.sub(r'[€$£EUR\s]', '', amount_str, flags=re.IGNORECASE)
+
+        # Detectar si hay separador de miles (formato español: 1.234,56)
+        if re.match(r'^-?\d{1,3}(\.\d{3})+,\d+$', amount_clean):
+            # Formato español con miles: quitar puntos de miles, cambiar coma por punto
+            amount_clean = amount_clean.replace('.', '').replace(',', '.')
+        else:
+            # Formato simple: solo cambiar coma por punto si es decimal
+            amount_clean = amount_clean.replace(',', '.')
+
+        normalized = round(float(amount_clean), 2)
+        result['normalized'] = normalized
+        result['formatted'] = f"{normalized:.2f}"
+        result['valid'] = True
+
+    except Exception:
+        pass
+
+    return result
+
+
+def normalize_fields(fields):
+    """
+    Aplica normalización v4.3 a todos los campos extraídos.
+
+    Normaliza:
+    - date → formato ISO (YYYY-MM-DD)
+    - vendor_nif, customer_nif → validación y formato
+    - total, tax_base, tax_amount → formato numérico estándar
+    - line_items.amount → formato numérico estándar
+
+    Returns:
+        dict: campos originales más '_normalized' con datos normalizados
+    """
+    if not fields:
+        return fields
+
+    # Crear copia para no modificar original
+    normalized = dict(fields)
+
+    # Añadir sección de normalización
+    normalized['_normalized'] = {
+        'version': '4.3',
+        'date': None,
+        'vendor_nif': None,
+        'customer_nif': None,
+        'amounts': {}
+    }
+
+    # Normalizar fecha
+    if fields.get('date'):
+        date_norm = normalize_date(fields['date'])
+        normalized['_normalized']['date'] = date_norm
+        if date_norm['valid']:
+            normalized['date_normalized'] = date_norm['normalized']
+
+    # Validar NIFs
+    if fields.get('vendor_nif'):
+        nif_norm = validate_spanish_nif(fields['vendor_nif'])
+        normalized['_normalized']['vendor_nif'] = nif_norm
+        if nif_norm['valid']:
+            normalized['vendor_nif_valid'] = nif_norm['control_check']
+            normalized['vendor_nif_type'] = nif_norm['type']
+
+    if fields.get('customer_nif'):
+        nif_norm = validate_spanish_nif(fields['customer_nif'])
+        normalized['_normalized']['customer_nif'] = nif_norm
+        if nif_norm['valid']:
+            normalized['customer_nif_valid'] = nif_norm['control_check']
+            normalized['customer_nif_type'] = nif_norm['type']
+
+    # Normalizar importes principales
+    amount_fields = ['total', 'tax_base', 'tax_amount']
+    for field_name in amount_fields:
+        if fields.get(field_name) is not None:
+            amount_norm = normalize_amount(fields[field_name])
+            normalized['_normalized']['amounts'][field_name] = amount_norm
+
+    # Normalizar importes en line_items
+    if fields.get('line_items'):
+        for item in normalized.get('line_items', []):
+            if 'amount' in item:
+                amount_norm = normalize_amount(item['amount'])
+                if amount_norm['valid']:
+                    item['amount_normalized'] = amount_norm['normalized']
+            if 'unit_price' in item:
+                price_norm = normalize_amount(item['unit_price'])
+                if price_norm['valid']:
+                    item['unit_price_normalized'] = price_norm['normalized']
+
+    return normalized
 
 
 def detect_document_type(text, fields):
