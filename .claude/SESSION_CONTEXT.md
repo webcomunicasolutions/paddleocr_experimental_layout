@@ -4,10 +4,10 @@
 
 ## Estado Actual del Proyecto
 
-### Versión: 4.4 (Multi-idioma e Internacionalización) - ESTABLE
+### Versión: 4.5 (Layout Mejorado para IA) - ESTABLE
 ### Próximo objetivo: Continuar validación masiva (~175 facturas)
 
-**ÚLTIMA ACTUALIZACIÓN:** 2025-12-07 - v4.4 completada. Validación piloto con 20 facturas realizada.
+**ÚLTIMA ACTUALIZACIÓN:** 2025-12-08 - v4.5 completada. Layout mejorado para consumo por IA.
 
 ---
 
@@ -48,7 +48,7 @@
 - **normalize_amount()**: Normaliza importes con moneda
 - **detect_currency()**: Detecta moneda predominante en documento
 
-### v4.4 - Multi-idioma e Internacionalización ✅ (NUEVA)
+### v4.4 - Multi-idioma e Internacionalización ✅
 - **customer_name Multi-label**: Extrae nombre de cliente con múltiples etiquetas
   - Español: "Cliente:", "Facturado a", "Datos de facturación", "Destinatario"
   - Inglés: "Bill to", "Sold to", "Customer", "Recipient"
@@ -68,6 +68,19 @@
 - **LINE_ITEMS limpieza**: Elimina fechas de garantía de descripciones
   - Filtra líneas que solo son fechas (DD-MM-YYYY)
   - Limpia "Garantía: DD-MM-YYYY" al final de descripciones
+
+### v4.5 - Layout Mejorado para IA ✅ (NUEVA)
+- **Objetivo**: Generar texto optimizado para consumo por IA (Claude, GPT)
+- **Preservación espacial absoluta**: Transforma coordenadas X del documento a posiciones de caracteres
+- **Estrategia híbrida inteligente**:
+  - PDFs vectoriales → pdftotext -layout (rápido y preciso)
+  - PDFs escaneados → coordenadas OCR con posicionamiento absoluto
+- **DBSCAN para columnas**: Detecta automáticamente columnas múltiples
+- **Manejo de colisiones**: Si hay textos superpuestos, busca espacios disponibles
+- **Resultados verificados**:
+  - Olivenet: Estructura 2 columnas preservada ✅
+  - DIGI: Layout complejo de 2 páginas preservado ✅
+  - Escaneadas: Tablas con columnas alineadas ✅
 
 ---
 
@@ -157,9 +170,9 @@ docker cp app.py paddlepaddle-cpu:/app/app.py && docker restart paddlepaddle-cpu
 ## SI SE CORTA LA COMUNICACIÓN
 
 1. Leer este archivo primero
-2. Estado actual: **v4.4 ESTABLE - Multi-idioma funcionando**
+2. Estado actual: **v4.5 ESTABLE - Layout mejorado para IA**
 3. Branch: `main`
 4. Siguiente tarea: **Continuar validación con facturas restantes**
-   - 20/175 facturas procesadas
-   - Mejoras implementadas y verificadas
-   - VALIDATION_REPORT.md tiene detalles completos
+   - Piloto #1 y #2 completados (~30 facturas)
+   - Layout v4.5 implementado y verificado
+   - Prioridad: `/process?format=layout` para IA, no `/extract`

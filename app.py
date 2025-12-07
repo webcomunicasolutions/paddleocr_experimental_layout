@@ -2481,7 +2481,10 @@ def detect_columns_dbscan(x_positions, eps_factor=0.05):
 def format_text_with_layout(text_blocks, coordinates, page_width=200, use_dbscan=True):
     """
     Reconstruye la estructura espacial del documento usando coordenadas.
-    MEJORADO v4.0: Usa DBSCAN para detectar columnas automáticamente.
+    MEJORADO v4.5: Preservación espacial mejorada para IA.
+
+    OBJETIVO: Generar texto que una IA pueda leer y entender la estructura
+    del documento original (columnas, tablas, alineación de valores).
 
     Args:
         text_blocks: Lista de textos detectados
@@ -2495,7 +2498,7 @@ def format_text_with_layout(text_blocks, coordinates, page_width=200, use_dbscan
     if not text_blocks or not coordinates:
         return '\n'.join(text_blocks) if text_blocks else ''
 
-    logger.info(f"[LAYOUT] Procesando {len(text_blocks)} bloques con {len(coordinates)} coordenadas")
+    logger.info(f"[LAYOUT v4.5] Procesando {len(text_blocks)} bloques con {len(coordinates)} coordenadas")
 
     # Crear lista de bloques con sus coordenadas
     blocks = []
@@ -2670,33 +2673,36 @@ def format_text_with_layout(text_blocks, coordinates, page_width=200, use_dbscan
             output_lines.append(''.join(line).rstrip())
 
         else:
-            # Modo simple: gaps entre bloques
-            line_parts = []
-            prev_block_end = None
+            # Modo simple MEJORADO v4.5: Preservar posición espacial absoluta
+            # Transformar coordenadas X del documento a posiciones de caracteres
+            # Esto es CRÍTICO para que la IA entienda la estructura (columnas, tablas)
+
+            line = [' '] * page_width
 
             for block in row_sorted:
-                if prev_block_end is not None:
-                    # Calcular gap entre el bloque anterior y este
-                    gap_px = block['x_min'] - prev_block_end
+                # Calcular posición en caracteres basada en X relativa al documento
+                # x_min está en píxeles, convertir a posición de caracter
+                rel_x = (block['x_min'] - x_offset) / doc_width if doc_width > 0 else 0
+                rel_x = max(0, min(0.95, rel_x))  # Limitar para dejar margen
 
-                    # Convertir gap a espacios (basado en ancho de caracter estimado)
-                    if gap_px > char_width_px * 8:
-                        spaces = '    '  # 4 espacios para columnas
-                    elif gap_px > char_width_px * 3:
-                        spaces = '   '
-                    elif gap_px > char_width_px * 1.5:
-                        spaces = '  '
-                    elif gap_px > char_width_px * 0.5:
-                        spaces = ' '
-                    else:
-                        spaces = ''
+                char_start = int(rel_x * page_width)
+                char_start = min(char_start, page_width - len(block['text']) - 1)
+                char_start = max(0, char_start)
 
-                    line_parts.append(spaces)
+                # Insertar texto en la posición calculada
+                text = block['text']
+                for i, char in enumerate(text):
+                    pos = char_start + i
+                    if pos < page_width and line[pos] == ' ':
+                        line[pos] = char
+                    elif pos < page_width and line[pos] != ' ':
+                        # Si hay colisión, buscar siguiente espacio disponible
+                        for alt_pos in range(pos, min(pos + len(text) - i + 5, page_width)):
+                            if line[alt_pos] == ' ':
+                                line[alt_pos] = char
+                                break
 
-                line_parts.append(block['text'])
-                prev_block_end = block['x_max']
-
-            output_lines.append(''.join(line_parts).strip())
+            output_lines.append(''.join(line).rstrip())
 
     return '\n'.join(output_lines)
 
