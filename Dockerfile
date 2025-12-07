@@ -34,7 +34,8 @@ RUN python3.10 -m pip install --upgrade pip && \
     PyPDF2 \
     PyMuPDF \
     flask \
-    waitress
+    waitress \
+    google-generativeai
 
 # Configurar directorio de trabajo
 WORKDIR /app

@@ -2399,14 +2399,15 @@ def apply_ocr_corrections(text):
 # para reconstruir la estructura visual del documento, similar a LLMWhisperer.
 # ============================================================================
 
-def format_text_with_layout(text_blocks, coordinates, page_width=120):
+def format_text_with_layout(text_blocks, coordinates, page_width=200):
     """
     Reconstruye la estructura espacial del documento usando coordenadas.
+    MEJORADO: Preserva columnas y estructura de facturas/tickets.
 
     Args:
         text_blocks: Lista de textos detectados
         coordinates: Lista de polígonos/bboxes [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-        page_width: Ancho de caracteres para la salida (default 120)
+        page_width: Ancho de caracteres para la salida (default 200 para facturas)
 
     Returns:
         Texto formateado manteniendo la estructura espacial
@@ -2440,6 +2441,7 @@ def format_text_with_layout(text_blocks, coordinates, page_width=120):
                         y_max = max(ys)
                         y_center = (y_min + y_max) / 2
                         height = y_max - y_min
+                        width = x_max - x_min
 
                         blocks.append({
                             'text': text,
@@ -2448,7 +2450,8 @@ def format_text_with_layout(text_blocks, coordinates, page_width=120):
                             'y_min': y_min,
                             'y_max': y_max,
                             'y_center': y_center,
-                            'height': height
+                            'height': height,
+                            'width': width
                         })
                         continue
             except (IndexError, TypeError, ValueError) as e:
@@ -2462,7 +2465,8 @@ def format_text_with_layout(text_blocks, coordinates, page_width=120):
                 'y_min': i * 30,
                 'y_max': i * 30 + 20,
                 'y_center': i * 30 + 10,
-                'height': 20
+                'height': 20,
+                'width': 100
             })
         else:
             # Sin coordenadas, posición por defecto
@@ -2473,7 +2477,8 @@ def format_text_with_layout(text_blocks, coordinates, page_width=120):
                 'y_min': i * 30,
                 'y_max': i * 30 + 20,
                 'y_center': i * 30 + 10,
-                'height': 20
+                'height': 20,
+                'width': 100
             })
 
     if not blocks:
@@ -2481,7 +2486,7 @@ def format_text_with_layout(text_blocks, coordinates, page_width=120):
 
     # Calcular tolerancia dinámica basada en la altura promedio de los bloques
     avg_height = sum(b['height'] for b in blocks) / len(blocks) if blocks else 20
-    ROW_TOLERANCE = avg_height * 0.6  # 60% de la altura promedio
+    ROW_TOLERANCE = avg_height * 0.7  # 70% de la altura promedio (más permisivo)
 
     logger.info(f"[LAYOUT] Altura promedio: {avg_height:.1f}px, tolerancia fila: {ROW_TOLERANCE:.1f}px")
 
@@ -2514,33 +2519,50 @@ def format_text_with_layout(text_blocks, coordinates, page_width=120):
 
     logger.info(f"[LAYOUT] Agrupados en {len(rows)} filas")
 
-    # Construir salida con espaciado proporcional
+    # Calcular ancho promedio de caracteres para espaciado más preciso
+    total_text_len = sum(len(b['text']) for b in blocks)
+    total_text_width = sum(b['width'] for b in blocks)
+    char_width_px = total_text_width / total_text_len if total_text_len > 0 else 10
+
+    logger.info(f"[LAYOUT] Ancho promedio por caracter: {char_width_px:.1f}px")
+
+    # Construir salida con espaciado basado en gaps reales
     output_lines = []
 
     for row in rows:
         # Ordenar bloques de la fila por X (izquierda a derecha)
         row_sorted = sorted(row, key=lambda b: b['x_min'])
 
-        # Construir línea con espaciado proporcional
-        line = ''
-        last_end_pos = 0
+        # Construir línea calculando gaps entre bloques
+        line_parts = []
+        prev_block_end = None
 
         for block in row_sorted:
-            # Calcular posición en caracteres (proporcional al ancho del documento)
-            char_pos = int(((block['x_min'] - x_offset) / doc_width) * page_width) if doc_width > 0 else 0
-            char_pos = max(char_pos, last_end_pos)  # No retroceder
+            if prev_block_end is not None:
+                # Calcular gap entre el bloque anterior y este
+                gap_px = block['x_min'] - prev_block_end
 
-            # Añadir espacios hasta la posición
-            spaces_needed = char_pos - len(line)
-            if spaces_needed > 0:
-                line += ' ' * spaces_needed
-            elif len(line) > 0 and not line.endswith(' '):
-                line += ' '  # Al menos un espacio entre bloques
+                # Convertir gap a espacios (basado en ancho de caracter estimado)
+                if gap_px > char_width_px * 8:
+                    # Gap grande = separador de columna (TAB visual)
+                    spaces = '    '  # 4 espacios para columnas
+                elif gap_px > char_width_px * 3:
+                    # Gap medio
+                    spaces = '   '
+                elif gap_px > char_width_px * 1.5:
+                    # Gap pequeño
+                    spaces = '  '
+                elif gap_px > char_width_px * 0.5:
+                    spaces = ' '
+                else:
+                    spaces = ''
 
-            line += block['text']
-            last_end_pos = len(line)
+                line_parts.append(spaces)
 
-        output_lines.append(line.rstrip())
+            line_parts.append(block['text'])
+            prev_block_end = block['x_max']
+
+        output_lines.append(''.join(line_parts).strip())
 
     return '\n'.join(output_lines)
 
@@ -2656,6 +2678,8 @@ def dashboard():
             <button class="tab active" onclick="showTab('dashboard')">Dashboard</button>
             <button class="tab" onclick="showTab('test')">Probar OCR</button>
             <button class="tab" onclick="showTab('dictionary')">Diccionario</button>
+            <button class="tab" onclick="showTab('improve')">Mejorar Diccionario</button>
+            <button class="tab" onclick="showTab('config')">Configuracion</button>
             <button class="tab" onclick="showTab('history')">Historial</button>
             <button class="tab" onclick="showTab('docs')">Documentacion</button>
         </div>
@@ -2851,6 +2875,134 @@ def dashboard():
                         {"".join('<tr id="row_' + wrong + '"><td style="padding:6px;border-bottom:1px solid #ddd;font-family:monospace;">' + wrong + '</td><td style="padding:6px;border-bottom:1px solid #ddd;">' + correct + '</td><td style="padding:6px;border-bottom:1px solid #ddd;"><button onclick="removeCorrection(' + "'" + wrong + "'" + ')" class="btn btn-danger" style="padding:5px 10px;font-size:0.8em;">Eliminar</button></td></tr>' for wrong, correct in OCR_CORRECTIONS_CUSTOM.items())}
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <!-- Tab: Mejorar Diccionario con IA -->
+        <div id="improve" class="tab-content">
+            <h2>Mejorar Diccionario con IA</h2>
+            <p style="color:#666;margin-bottom:20px;">Sube un documento, ejecuta OCR, y usa Gemini Vision para detectar y corregir errores automaticamente.</p>
+
+            <div id="improveApiKeyWarning" style="background:#fff3cd;border:1px solid #ffc107;padding:15px;border-radius:8px;margin-bottom:20px;display:none;">
+                <strong>Atencion:</strong> Necesitas configurar una API Key de Gemini en la pestana "Configuracion" para usar esta funcion.
+                <button onclick="showTab('config')" class="btn btn-primary" style="margin-left:15px;padding:8px 15px;">Ir a Configuracion</button>
+            </div>
+
+            <!-- Paso 1: Subir documento -->
+            <div class="ocr-form">
+                <h3>Paso 1: Subir Documento</h3>
+                <div class="form-group">
+                    <label>Seleccionar PDF o Imagen:</label>
+                    <input type="file" id="improveFile" accept=".pdf,.png,.jpg,.jpeg,.tiff,.bmp">
+                </div>
+                <button class="btn btn-primary" onclick="runImproveOCR()">Ejecutar OCR</button>
+            </div>
+
+            <!-- Paso 2: Resultado OCR -->
+            <div id="improveOcrResult" style="display:none;margin-top:20px;">
+                <h3>Paso 2: Resultado OCR</h3>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+                    <div>
+                        <h4>Texto Original (OCR)</h4>
+                        <textarea id="improveOcrText" style="width:100%;height:300px;font-family:monospace;padding:10px;border:1px solid #ddd;border-radius:8px;" readonly></textarea>
+                    </div>
+                    <div>
+                        <h4>Texto Corregido (IA)</h4>
+                        <textarea id="improveCorrectedText" style="width:100%;height:300px;font-family:monospace;padding:10px;border:1px solid #ddd;border-radius:8px;" readonly placeholder="Haz clic en 'Corregir con IA' para ver el resultado..."></textarea>
+                    </div>
+                </div>
+                <div style="margin-top:15px;text-align:center;">
+                    <button class="btn btn-primary" onclick="correctWithAI()" id="correctAIBtn">Corregir con Gemini Vision</button>
+                    <span id="improveLoading" style="display:none;margin-left:15px;">
+                        <span class="spinner" style="display:inline-block;width:20px;height:20px;border-width:2px;vertical-align:middle;"></span>
+                        Procesando con IA...
+                    </span>
+                </div>
+            </div>
+
+            <!-- Paso 3: Correcciones detectadas -->
+            <div id="improveCorrections" style="display:none;margin-top:20px;">
+                <h3>Paso 3: Nuevas Correcciones Detectadas</h3>
+                <p style="color:#666;">Selecciona las correcciones que quieres anadir al diccionario:</p>
+                <div id="correctionsList" style="background:#f8f9fa;padding:15px;border-radius:8px;max-height:400px;overflow-y:auto;">
+                    <!-- Se llena dinamicamente -->
+                </div>
+                <div style="margin-top:15px;">
+                    <button class="btn btn-primary" onclick="addSelectedCorrections()">Anadir Seleccionadas al Diccionario</button>
+                    <span id="addedCount" style="margin-left:15px;color:#28a745;display:none;"></span>
+                </div>
+            </div>
+
+            <!-- Seccion: Importar diccionarios -->
+            <div style="margin-top:40px;padding-top:20px;border-top:2px solid #eee;">
+                <h3>Importar Diccionarios Externos</h3>
+                <p style="color:#666;">Importa diccionarios de correcciones desde archivos JSON o URLs.</p>
+
+                <div class="form-group" style="margin-top:15px;">
+                    <label>Subir archivo JSON:</label>
+                    <input type="file" id="importDictFile" accept=".json">
+                </div>
+                <button class="btn btn-primary" onclick="importDictionaryFile()" style="margin-bottom:20px;">Importar desde Archivo</button>
+
+                <div class="form-group">
+                    <label>O importar desde URL:</label>
+                    <div style="display:flex;gap:10px;">
+                        <input type="text" id="importDictUrl" placeholder="https://ejemplo.com/diccionario.json" style="flex:1;padding:10px;border:1px solid #ddd;border-radius:5px;">
+                        <button class="btn btn-primary" onclick="importDictionaryUrl()">Importar</button>
+                    </div>
+                </div>
+
+                <div id="importResult" style="display:none;margin-top:15px;padding:15px;border-radius:8px;"></div>
+            </div>
+        </div>
+
+        <!-- Tab: Configuracion -->
+        <div id="config" class="tab-content">
+            <h2>Configuracion</h2>
+
+            <div style="background:#f8f9fa;padding:25px;border-radius:10px;margin:20px 0;">
+                <h3 style="margin-top:0;">API Keys para Correccion con IA</h3>
+                <p style="color:#666;">Configura tu API Key de Gemini para usar la funcion de correccion automatica con IA.</p>
+
+                <div class="form-group" style="margin-top:20px;">
+                    <label>Gemini API Key:</label>
+                    <div style="display:flex;gap:10px;">
+                        <input type="password" id="geminiApiKey" placeholder="AIza..." style="flex:1;padding:12px;border:1px solid #ddd;border-radius:5px;font-family:monospace;">
+                        <button class="btn" onclick="toggleApiKeyVisibility()" style="background:#6c757d;color:white;">Mostrar</button>
+                        <button class="btn btn-primary" onclick="saveApiKey()">Guardar</button>
+                    </div>
+                </div>
+
+                <div id="apiKeyStatus" style="margin-top:15px;padding:12px;border-radius:5px;display:none;"></div>
+
+                <div style="margin-top:20px;padding:15px;background:#e8f4f8;border-radius:8px;border-left:4px solid #17a2b8;">
+                    <strong>Como obtener una API Key de Gemini:</strong>
+                    <ol style="margin:10px 0 0 20px;color:#666;">
+                        <li>Ve a <a href="https://aistudio.google.com/apikey" target="_blank" style="color:#667eea;">Google AI Studio</a></li>
+                        <li>Inicia sesion con tu cuenta de Google</li>
+                        <li>Haz clic en "Create API Key"</li>
+                        <li>Copia la clave y pegala aqui</li>
+                    </ol>
+                    <p style="margin-top:10px;font-size:0.9em;color:#666;"><strong>Nota:</strong> La API de Gemini tiene un tier gratuito generoso. La clave se guarda localmente en el servidor.</p>
+                </div>
+            </div>
+
+            <div style="background:#f8f9fa;padding:25px;border-radius:10px;margin:20px 0;">
+                <h3 style="margin-top:0;">Estado de la Configuracion</h3>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="configApiKeyStatus">-</div>
+                        <div class="stat-label">API Key Gemini</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="configDictCount">-</div>
+                        <div class="stat-label">Correcciones en Diccionario</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="configCustomCount">-</div>
+                        <div class="stat-label">Correcciones Personalizadas</div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -3241,6 +3393,298 @@ Body Parameters:
             document.getElementById('customCount').textContent = stats.custom_count;
             document.getElementById('totalCount').textContent = stats.total_count;
         }}
+
+        // ========== API KEY / CONFIG FUNCTIONS ==========
+
+        let currentImproveImagePath = null;
+
+        async function checkApiKeyStatus() {{
+            try {{
+                const response = await fetch('/api/config/apikey');
+                const data = await response.json();
+
+                // Actualizar estado en tab config
+                const statusEl = document.getElementById('configApiKeyStatus');
+                if (statusEl) {{
+                    statusEl.textContent = data.configured ? 'Configurada' : 'No configurada';
+                    statusEl.style.color = data.configured ? '#28a745' : '#dc3545';
+                }}
+
+                // Mostrar/ocultar warning en tab improve
+                const warningEl = document.getElementById('improveApiKeyWarning');
+                if (warningEl) {{
+                    warningEl.style.display = data.configured ? 'none' : 'block';
+                }}
+
+                // Actualizar stats del diccionario
+                const dictResponse = await fetch('/api/dictionary');
+                const dictData = await dictResponse.json();
+                if (document.getElementById('configDictCount')) {{
+                    document.getElementById('configDictCount').textContent = Object.keys(dictData.base || {{}}).length;
+                }}
+                if (document.getElementById('configCustomCount')) {{
+                    document.getElementById('configCustomCount').textContent = Object.keys(dictData.custom || {{}}).length;
+                }}
+
+                return data.configured;
+            }} catch (error) {{
+                console.error('Error checking API key:', error);
+                return false;
+            }}
+        }}
+
+        function toggleApiKeyVisibility() {{
+            const input = document.getElementById('geminiApiKey');
+            const btn = event.target;
+            if (input.type === 'password') {{
+                input.type = 'text';
+                btn.textContent = 'Ocultar';
+            }} else {{
+                input.type = 'password';
+                btn.textContent = 'Mostrar';
+            }}
+        }}
+
+        async function saveApiKey() {{
+            const apiKey = document.getElementById('geminiApiKey').value.trim();
+            const statusDiv = document.getElementById('apiKeyStatus');
+
+            if (!apiKey) {{
+                statusDiv.innerHTML = '<span style="color:red;">Error: Introduce una API Key</span>';
+                statusDiv.style.display = 'block';
+                statusDiv.style.background = '#f8d7da';
+                return;
+            }}
+
+            try {{
+                const response = await fetch('/api/config/apikey', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{ api_key: apiKey }})
+                }});
+                const data = await response.json();
+
+                if (data.success) {{
+                    statusDiv.innerHTML = '<span style="color:green;">✓ API Key guardada correctamente</span>';
+                    statusDiv.style.background = '#d4edda';
+                    document.getElementById('geminiApiKey').value = '';
+                    checkApiKeyStatus();
+                }} else {{
+                    statusDiv.innerHTML = `<span style="color:red;">✗ ${{data.error}}</span>`;
+                    statusDiv.style.background = '#f8d7da';
+                }}
+                statusDiv.style.display = 'block';
+            }} catch (error) {{
+                statusDiv.innerHTML = `<span style="color:red;">Error: ${{error.message}}</span>`;
+                statusDiv.style.display = 'block';
+                statusDiv.style.background = '#f8d7da';
+            }}
+        }}
+
+        // ========== IMPROVE DICTIONARY FUNCTIONS ==========
+
+        async function runImproveOCR() {{
+            const fileInput = document.getElementById('improveFile');
+            if (!fileInput.files[0]) {{
+                alert('Selecciona un archivo primero');
+                return;
+            }}
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('format', 'normal');
+            formData.append('return_image_path', 'true');
+
+            try {{
+                document.getElementById('improveOcrResult').style.display = 'none';
+                document.getElementById('improveCorrections').style.display = 'none';
+
+                const response = await fetch('/process', {{ method: 'POST', body: formData }});
+                const data = await response.json();
+
+                if (data.success) {{
+                    document.getElementById('improveOcrText').value = data.text || '';
+                    document.getElementById('improveCorrectedText').value = '';
+                    document.getElementById('improveOcrResult').style.display = 'block';
+                    currentImproveImagePath = data.image_path || null;
+                }} else {{
+                    alert('Error en OCR: ' + (data.error || 'Error desconocido'));
+                }}
+            }} catch (error) {{
+                alert('Error: ' + error.message);
+            }}
+        }}
+
+        async function correctWithAI() {{
+            const hasKey = await checkApiKeyStatus();
+            if (!hasKey) {{
+                alert('Configura una API Key de Gemini primero');
+                showTab('config');
+                return;
+            }}
+
+            const ocrText = document.getElementById('improveOcrText').value;
+            if (!ocrText) {{
+                alert('Primero ejecuta el OCR');
+                return;
+            }}
+
+            const fileInput = document.getElementById('improveFile');
+            if (!fileInput.files[0]) {{
+                alert('El archivo original ya no esta disponible. Vuelve a subirlo.');
+                return;
+            }}
+
+            document.getElementById('improveLoading').style.display = 'inline';
+            document.getElementById('correctAIBtn').disabled = true;
+
+            try {{
+                const formData = new FormData();
+                formData.append('file', fileInput.files[0]);
+                formData.append('ocr_text', ocrText);
+
+                const response = await fetch('/api/dictionary/improve', {{
+                    method: 'POST',
+                    body: formData
+                }});
+                const data = await response.json();
+
+                document.getElementById('improveLoading').style.display = 'none';
+                document.getElementById('correctAIBtn').disabled = false;
+
+                if (data.success) {{
+                    document.getElementById('improveCorrectedText').value = data.corrected_text || '';
+
+                    // Mostrar correcciones detectadas
+                    if (data.corrections && data.corrections.length > 0) {{
+                        displayCorrections(data.corrections);
+                    }} else {{
+                        document.getElementById('correctionsList').innerHTML = '<p style="color:#666;">No se detectaron nuevas correcciones.</p>';
+                        document.getElementById('improveCorrections').style.display = 'block';
+                    }}
+                }} else {{
+                    alert('Error: ' + (data.error || 'Error desconocido'));
+                }}
+            }} catch (error) {{
+                document.getElementById('improveLoading').style.display = 'none';
+                document.getElementById('correctAIBtn').disabled = false;
+                alert('Error: ' + error.message);
+            }}
+        }}
+
+        function displayCorrections(corrections) {{
+            const container = document.getElementById('correctionsList');
+            let html = '';
+
+            corrections.forEach((c, idx) => {{
+                const existsClass = c.exists ? 'style="opacity:0.5;"' : '';
+                const existsNote = c.exists ? '<span style="color:#666;font-size:0.9em;"> (ya existe)</span>' : '';
+                const checked = c.exists ? '' : 'checked';
+
+                html += `
+                    <div style="padding:10px;margin:5px 0;background:white;border-radius:5px;display:flex;align-items:center;gap:15px;" ${{existsClass}}>
+                        <input type="checkbox" id="correction_${{idx}}" data-wrong="${{c.wrong}}" data-correct="${{c.correct}}" ${{checked}} ${{c.exists ? 'disabled' : ''}}>
+                        <code style="background:#f4f4f4;padding:3px 8px;border-radius:3px;">${{c.wrong}}</code>
+                        <span>→</span>
+                        <code style="background:#d4edda;padding:3px 8px;border-radius:3px;">${{c.correct}}</code>
+                        ${{existsNote}}
+                    </div>
+                `;
+            }});
+
+            container.innerHTML = html || '<p style="color:#666;">No se detectaron nuevas correcciones.</p>';
+            document.getElementById('improveCorrections').style.display = 'block';
+        }}
+
+        async function addSelectedCorrections() {{
+            const checkboxes = document.querySelectorAll('#correctionsList input[type="checkbox"]:checked:not([disabled])');
+            let added = 0;
+
+            for (const cb of checkboxes) {{
+                const wrong = cb.dataset.wrong;
+                const correct = cb.dataset.correct;
+
+                try {{
+                    await fetch('/api/dictionary/add', {{
+                        method: 'POST',
+                        headers: {{'Content-Type': 'application/json'}},
+                        body: JSON.stringify({{ wrong, correct, dictionary: 'custom' }})
+                    }});
+                    added++;
+                    cb.checked = false;
+                    cb.disabled = true;
+                    cb.parentElement.style.opacity = '0.5';
+                }} catch (e) {{
+                    console.error('Error adding correction:', e);
+                }}
+            }}
+
+            const countEl = document.getElementById('addedCount');
+            countEl.textContent = `✓ ${{added}} correcciones anadidas`;
+            countEl.style.display = 'inline';
+            setTimeout(() => countEl.style.display = 'none', 3000);
+        }}
+
+        // ========== IMPORT DICTIONARY FUNCTIONS ==========
+
+        async function importDictionaryFile() {{
+            const fileInput = document.getElementById('importDictFile');
+            if (!fileInput.files[0]) {{
+                alert('Selecciona un archivo JSON');
+                return;
+            }}
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            try {{
+                const response = await fetch('/api/dictionary/import', {{
+                    method: 'POST',
+                    body: formData
+                }});
+                const data = await response.json();
+                showImportResult(data);
+            }} catch (error) {{
+                showImportResult({{ success: false, error: error.message }});
+            }}
+        }}
+
+        async function importDictionaryUrl() {{
+            const url = document.getElementById('importDictUrl').value.trim();
+            if (!url) {{
+                alert('Introduce una URL');
+                return;
+            }}
+
+            try {{
+                const response = await fetch('/api/dictionary/import', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{ url }})
+                }});
+                const data = await response.json();
+                showImportResult(data);
+            }} catch (error) {{
+                showImportResult({{ success: false, error: error.message }});
+            }}
+        }}
+
+        function showImportResult(data) {{
+            const resultDiv = document.getElementById('importResult');
+            if (data.success) {{
+                resultDiv.innerHTML = `<span style="color:green;">✓ ${{data.message || 'Importado correctamente'}} (${{data.imported || 0}} correcciones)</span>`;
+                resultDiv.style.background = '#d4edda';
+            }} else {{
+                resultDiv.innerHTML = `<span style="color:red;">✗ ${{data.error || 'Error desconocido'}}</span>`;
+                resultDiv.style.background = '#f8d7da';
+            }}
+            resultDiv.style.display = 'block';
+        }}
+
+        // Comprobar estado API key al cargar
+        document.addEventListener('DOMContentLoaded', function() {{
+            checkApiKeyStatus();
+        }});
     </script>
 </body>
 </html>
@@ -3376,14 +3820,14 @@ def process():
 
             # Aplicar formato según selección del usuario
             if output_format == 'layout':
-                # Layout: usar texto con estructura espacial
+                # Layout: usar pdftotext -layout que preserva espaciado del PDF generado
                 if extracted_text_layout:
                     formatted_text = extracted_text_layout
-                    logger.info(f"[PROCESS] Modo Layout aplicado - {len(formatted_text)} chars con estructura espacial")
-                elif ocr_blocks and coordinates:
-                    # Fallback: reconstruir desde OCR si no hay texto layout
+                    logger.info(f"[PROCESS] Modo Layout (pdftotext) - {len(formatted_text)} chars")
+                elif ocr_blocks and coordinates and len(coordinates) > 0:
+                    # Fallback: nuestra reconstrucción con coordenadas
                     formatted_text = format_text_with_layout(ocr_blocks, coordinates, page_width=120)
-                    logger.info(f"[PROCESS] Modo Layout (OCR) - {len(ocr_blocks)} bloques")
+                    logger.info(f"[PROCESS] Modo Layout (coordenadas) - {len(ocr_blocks)} bloques")
                 else:
                     formatted_text = extracted_text_plain
                     logger.info(f"[PROCESS] Modo Layout fallback a texto plano")
@@ -3836,6 +4280,661 @@ def api_dictionary_analyze():
                 pass
         logger.error(f"[DICTIONARY ANALYZE ERROR] {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# API DE CONFIGURACIÓN - API Keys
+# ============================================================================
+
+# Directorio para configuración persistente
+CONFIG_DIR = '/app/config'
+API_KEYS_FILE = os.path.join(CONFIG_DIR, 'api_keys.json')
+
+def load_api_keys():
+    """Carga las API keys guardadas"""
+    try:
+        if os.path.exists(API_KEYS_FILE):
+            with open(API_KEYS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"[CONFIG] Error cargando API keys: {e}")
+    return {}
+
+def save_api_keys(keys_data):
+    """Guarda las API keys"""
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(API_KEYS_FILE, 'w') as f:
+            json.dump(keys_data, f, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"[CONFIG] Error guardando API keys: {e}")
+        return False
+
+def get_gemini_api_key():
+    """Obtiene la API key de Gemini guardada"""
+    keys = load_api_keys()
+    return keys.get('gemini_api_key', '')
+
+
+@app.route('/api/config/apikey', methods=['GET', 'POST'])
+def api_config_apikey():
+    """
+    GET: Verifica si hay API key configurada (sin revelar la key)
+    POST: Guarda una nueva API key
+    """
+    if request.method == 'GET':
+        keys = load_api_keys()
+        has_key = bool(keys.get('gemini_api_key', ''))
+        return jsonify({
+            'configured': has_key,
+            'configured_at': keys.get('configured_at', None),
+            'provider': 'gemini'
+        })
+
+    elif request.method == 'POST':
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({'success': False, 'error': 'No data provided'}), 400
+
+            api_key = data.get('api_key', '').strip()
+            if not api_key:
+                return jsonify({'success': False, 'error': 'API key is required'}), 400
+
+            # Validación básica del formato de API key de Gemini
+            if not api_key.startswith('AIza'):
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid Gemini API key format. Should start with "AIza..."'
+                }), 400
+
+            # Guardar la API key
+            keys_data = load_api_keys()
+            keys_data['gemini_api_key'] = api_key
+            keys_data['configured_at'] = datetime.now().isoformat()
+            keys_data['provider'] = 'gemini'
+
+            if save_api_keys(keys_data):
+                logger.info("[CONFIG] Gemini API key guardada correctamente")
+                return jsonify({
+                    'success': True,
+                    'message': 'API key saved successfully'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'Failed to save API key'
+                }), 500
+
+        except Exception as e:
+            logger.error(f"[CONFIG API KEY ERROR] {e}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/config/apikey/test', methods=['POST'])
+def api_config_apikey_test():
+    """
+    Prueba si la API key de Gemini funciona
+    """
+    try:
+        api_key = get_gemini_api_key()
+        if not api_key:
+            return jsonify({
+                'success': False,
+                'error': 'No API key configured'
+            }), 400
+
+        # Intentar importar google-generativeai
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            return jsonify({
+                'success': False,
+                'error': 'google-generativeai not installed. Rebuild Docker image.'
+            }), 500
+
+        # Configurar y probar
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content("Say 'OK' if you can read this.")
+
+        return jsonify({
+            'success': True,
+            'message': 'API key is valid and working',
+            'response': response.text[:100] if response.text else 'OK'
+        })
+
+    except Exception as e:
+        error_msg = str(e)
+        if 'API_KEY_INVALID' in error_msg or 'invalid' in error_msg.lower():
+            return jsonify({
+                'success': False,
+                'error': 'API key is invalid. Please check and try again.'
+            }), 400
+        logger.error(f"[CONFIG API KEY TEST ERROR] {e}")
+        return jsonify({'success': False, 'error': error_msg}), 500
+
+
+# ============================================================================
+# API DE MEJORA DE DICCIONARIO CON GEMINI VISION
+# ============================================================================
+
+def correct_text_with_gemini(image_path, ocr_text):
+    """
+    Usa Gemini Vision para corregir el texto OCR comparándolo con la imagen.
+
+    Args:
+        image_path: Ruta a la imagen del documento
+        ocr_text: Texto extraído por OCR
+
+    Returns:
+        dict con texto corregido y correcciones detectadas
+    """
+    api_key = get_gemini_api_key()
+    if not api_key:
+        return {'success': False, 'error': 'No API key configured'}
+
+    try:
+        import google.generativeai as genai
+        from PIL import Image
+    except ImportError as e:
+        return {'success': False, 'error': f'Missing dependency: {e}'}
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+
+        # Cargar imagen
+        image = Image.open(image_path)
+
+        # Prompt para corrección OCR
+        prompt = f"""Eres un corrector de OCR especializado en documentos en español (facturas, tickets, albaranes).
+
+Te doy una imagen de un documento y el texto que extrajo el OCR. Tu tarea es:
+1. Comparar el texto OCR con lo que ves en la imagen
+2. Corregir SOLO los errores de reconocimiento de caracteres
+3. NO cambies el formato ni añadas información que no esté en la imagen
+4. Presta especial atención a:
+   - Tildes y acentos (á, é, í, ó, ú, ñ)
+   - Confusiones comunes: 0/O, 1/l/I, 5/S, 8/B, rn/m
+   - Precios con : en lugar de , (55:23 → 55,23)
+   - Términos fiscales: IVA, NIF, CIF, Total, Base
+   - Ciudades españolas con tildes
+
+TEXTO OCR A CORREGIR:
+{ocr_text}
+
+Responde SOLO con el texto corregido, manteniendo exactamente el mismo formato y estructura que el original."""
+
+        # Llamar a Gemini Vision
+        response = model.generate_content([prompt, image])
+        corrected_text = response.text.strip()
+
+        # Extraer diferencias (correcciones)
+        corrections = extract_text_differences(ocr_text, corrected_text)
+
+        return {
+            'success': True,
+            'original_text': ocr_text,
+            'corrected_text': corrected_text,
+            'corrections': corrections,
+            'corrections_count': len(corrections)
+        }
+
+    except Exception as e:
+        logger.error(f"[GEMINI VISION ERROR] {e}")
+        return {'success': False, 'error': str(e)}
+
+
+def extract_text_differences(original, corrected):
+    """
+    Extrae las diferencias entre el texto original y el corregido.
+    Retorna lista de correcciones {wrong, correct, exists}.
+    """
+    corrections = []
+
+    # Dividir en palabras
+    original_words = original.split()
+    corrected_words = corrected.split()
+
+    # Usar difflib para encontrar diferencias
+    import difflib
+
+    matcher = difflib.SequenceMatcher(None, original_words, corrected_words)
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'replace':
+            # Palabras cambiadas
+            for orig, corr in zip(original_words[i1:i2], corrected_words[j1:j2]):
+                if orig != corr and len(orig) > 1:  # Ignorar caracteres sueltos
+                    # Verificar si ya existe en el diccionario
+                    exists = orig in OCR_CORRECTIONS or orig.upper() in OCR_CORRECTIONS
+                    corrections.append({
+                        'wrong': orig,
+                        'correct': corr,
+                        'exists': exists
+                    })
+
+    # Eliminar duplicados
+    seen = set()
+    unique_corrections = []
+    for c in corrections:
+        key = (c['wrong'], c['correct'])
+        if key not in seen:
+            seen.add(key)
+            unique_corrections.append(c)
+
+    return unique_corrections
+
+
+@app.route('/api/dictionary/improve', methods=['POST'])
+def api_dictionary_improve():
+    """
+    Procesa un documento con OCR y luego lo corrige con Gemini Vision.
+    Extrae las diferencias como correcciones sugeridas.
+
+    Pasos:
+    1. Recibe PDF/imagen
+    2. Ejecuta OCR con PaddleOCR
+    3. Envía imagen + texto OCR a Gemini Vision
+    4. Gemini devuelve texto corregido
+    5. Compara y extrae diferencias
+    6. Retorna lista de correcciones sugeridas
+    """
+    global server_stats
+    start_time = time.time()
+    temp_file_path = None
+    temp_image_path = None
+
+    try:
+        # Verificar API key
+        if not get_gemini_api_key():
+            return jsonify({
+                'success': False,
+                'error': 'No Gemini API key configured. Go to Configuration tab to set it up.'
+            }), 400
+
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'Empty filename'}), 400
+
+        # Guardar archivo temporal
+        n8nHomeDir = '/home/n8n'
+        os.makedirs(f"{n8nHomeDir}/in", exist_ok=True)
+
+        temp_filename = f"improve_{int(time.time())}_{file.filename}"
+        temp_file_path = f"{n8nHomeDir}/in/{temp_filename}"
+        file.save(temp_file_path)
+
+        # 1. Procesar con OCR
+        logger.info(f"[IMPROVE] Procesando OCR: {temp_filename}")
+        with app.test_request_context('/ocr', method='POST', data={'filename': temp_file_path}):
+            response = ocr()
+            if isinstance(response, tuple):
+                response_data, status_code = response
+            else:
+                response_data = response
+            response_json = response_data.get_json()
+
+        if not response_json.get('success'):
+            return jsonify({
+                'success': False,
+                'error': response_json.get('error', 'OCR failed')
+            }), 500
+
+        ocr_text = response_json.get('extracted_text_plain', '')
+
+        # 2. Preparar imagen para Gemini Vision
+        # Si es PDF, convertir primera página a imagen
+        if temp_file_path.lower().endswith('.pdf'):
+            import subprocess
+            temp_image_path = temp_file_path.replace('.pdf', '_page1.png')
+            # Usar pdftoppm para convertir PDF a imagen
+            try:
+                subprocess.run([
+                    'pdftoppm', '-png', '-f', '1', '-l', '1', '-r', '150',
+                    temp_file_path, temp_file_path.replace('.pdf', '')
+                ], check=True, capture_output=True)
+                # pdftoppm añade -1 al nombre
+                expected_path = temp_file_path.replace('.pdf', '-1.png')
+                if os.path.exists(expected_path):
+                    temp_image_path = expected_path
+            except Exception as pdf_err:
+                logger.warning(f"[IMPROVE] Error convirtiendo PDF: {pdf_err}")
+                # Intentar usar el PDF directamente si Gemini lo soporta
+                temp_image_path = temp_file_path
+        else:
+            temp_image_path = temp_file_path
+
+        # 3. Corregir con Gemini Vision
+        logger.info(f"[IMPROVE] Enviando a Gemini Vision...")
+        vision_result = correct_text_with_gemini(temp_image_path, ocr_text)
+
+        # Limpiar archivos temporales
+        for path in [temp_file_path, temp_image_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+        # También limpiar posibles archivos de conversión PDF
+        for suffix in ['-1.png', '-2.png', '_page1.png']:
+            check_path = temp_file_path.replace('.pdf', suffix) if temp_file_path else None
+            if check_path and os.path.exists(check_path):
+                try:
+                    os.remove(check_path)
+                except:
+                    pass
+
+        if not vision_result.get('success'):
+            return jsonify(vision_result), 500
+
+        processing_time = time.time() - start_time
+
+        return jsonify({
+            'success': True,
+            'ocr_text': ocr_text,
+            'corrected_text': vision_result.get('corrected_text', ''),
+            'corrections': vision_result.get('corrections', []),
+            'corrections_count': vision_result.get('corrections_count', 0),
+            'processing_time': round(processing_time, 3)
+        })
+
+    except Exception as e:
+        # Limpiar archivos temporales
+        for path in [temp_file_path, temp_image_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+
+        logger.error(f"[DICTIONARY IMPROVE ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# API DE IMPORTACIÓN DE DICCIONARIOS
+# ============================================================================
+
+# Diccionarios externos predefinidos
+EXTERNAL_DICTIONARIES = {
+    'spanish_cities': {
+        'name': 'Ciudades Españolas',
+        'description': 'Ciudades y provincias de España con tildes correctas',
+        'url': None,  # Diccionario embebido
+        'corrections': {
+            # Capitales de provincia
+            'Cadiz': 'Cádiz', 'CADIZ': 'CÁDIZ', 'cadiz': 'cádiz',
+            'Cordoba': 'Córdoba', 'CORDOBA': 'CÓRDOBA', 'cordoba': 'córdoba',
+            'Malaga': 'Málaga', 'MALAGA': 'MÁLAGA', 'malaga': 'málaga',
+            'Almeria': 'Almería', 'ALMERIA': 'ALMERÍA', 'almeria': 'almería',
+            'Jaen': 'Jaén', 'JAEN': 'JAÉN', 'jaen': 'jaén',
+            'Leon': 'León', 'LEON': 'LEÓN', 'leon': 'león',
+            'Avila': 'Ávila', 'AVILA': 'ÁVILA', 'avila': 'ávila',
+            'Caceres': 'Cáceres', 'CACERES': 'CÁCERES', 'caceres': 'cáceres',
+            'Castellon': 'Castellón', 'CASTELLON': 'CASTELLÓN',
+            'Gijon': 'Gijón', 'GIJON': 'GIJÓN', 'gijon': 'gijón',
+            'Logrono': 'Logroño', 'LOGRONO': 'LOGROÑO', 'logrono': 'logroño',
+            'San Sebastian': 'San Sebastián', 'SAN SEBASTIAN': 'SAN SEBASTIÁN',
+            'Merida': 'Mérida', 'MERIDA': 'MÉRIDA', 'merida': 'mérida',
+            # Comunidades autónomas
+            'Aragon': 'Aragón', 'ARAGON': 'ARAGÓN',
+            'Cataluna': 'Cataluña', 'CATALUNA': 'CATALUÑA',
+            'Andalucia': 'Andalucía', 'ANDALUCIA': 'ANDALUCÍA',
+            'Pais Vasco': 'País Vasco', 'PAIS VASCO': 'PAÍS VASCO',
+            # Otras ciudades
+            'Mostoles': 'Móstoles', 'Alcorcon': 'Alcorcón',
+            'Torrejon': 'Torrejón', 'Leganes': 'Leganés',
+            'Getafe': 'Getafe', 'Alcala': 'Alcalá',
+        }
+    },
+    'fiscal_terms': {
+        'name': 'Términos Fiscales',
+        'description': 'IVA, NIF, CIF y términos de facturación',
+        'url': None,
+        'corrections': {
+            # IVA
+            '1VA': 'IVA', 'lVA': 'IVA', '|VA': 'IVA',
+            'I.V.A': 'IVA', 'I.V.A.': 'IVA',
+            # NIF/CIF
+            'N1F': 'NIF', 'NlF': 'NIF', 'N.1.F': 'NIF', 'N.I.F': 'NIF',
+            'C1F': 'CIF', 'ClF': 'CIF', 'C.1.F': 'CIF', 'C.I.F': 'CIF',
+            # IRPF
+            '1RPF': 'IRPF', 'lRPF': 'IRPF', '|RPF': 'IRPF',
+            # Otros términos
+            'TOTA1': 'TOTAL', 'T0TAL': 'TOTAL', 'TOTAI': 'TOTAL',
+            'lMPORTE': 'IMPORTE', '1MPORTE': 'IMPORTE',
+            'SUBTOTA1': 'SUBTOTAL', 'SUBT0TAL': 'SUBTOTAL',
+            'DESCUENT0': 'DESCUENTO', 'DESCUENT': 'DESCUENTO',
+            'FACTURA': 'FACTURA', 'FACT': 'FACTURA',
+            'FECHA': 'FECHA', 'FECH': 'FECHA',
+            'CANTIDAD': 'CANTIDAD', 'CANT': 'CANTIDAD',
+            'PREC10': 'PRECIO', 'PRECI0': 'PRECIO',
+            # Base imponible
+            'BASE 1MPONIBLE': 'BASE IMPONIBLE',
+            'BASE IMPON1BLE': 'BASE IMPONIBLE',
+            'BASE IMP0NIBLE': 'BASE IMPONIBLE',
+        }
+    },
+    'common_ocr_errors': {
+        'name': 'Errores OCR Comunes',
+        'description': 'Confusiones típicas de reconocimiento de caracteres',
+        'url': None,
+        'corrections': {
+            # Números por letras
+            '0': 'O',  # Solo en contextos específicos
+            '1': 'l',  # Solo en contextos específicos
+            # Palabras comunes mal leídas
+            'cornprar': 'comprar', 'cornpra': 'compra',
+            'nurnero': 'número', 'nurneros': 'números',
+            'tarnbien': 'también', 'tarnbién': 'también',
+            'siernpre': 'siempre',
+            'tiernpo': 'tiempo',
+            'ejernplo': 'ejemplo',
+            # rn -> m
+            'inforrnacion': 'información',
+            'inforrnación': 'información',
+            'forrnulario': 'formulario',
+            'norrnativa': 'normativa',
+            # Tildes comunes
+            'informacion': 'información',
+            'direccion': 'dirección',
+            'telefono': 'teléfono',
+            'numero': 'número',
+            'articulo': 'artículo',
+            'metodo': 'método',
+            'pagina': 'página',
+            'codigo': 'código',
+            'automatico': 'automático',
+            'electronico': 'electrónico',
+        }
+    },
+    'products_services': {
+        'name': 'Productos y Servicios',
+        'description': 'Productos, combustibles y servicios comunes',
+        'url': None,
+        'corrections': {
+            # Combustibles
+            'GASOLEO': 'GASÓLEO', 'Gasoleo': 'Gasóleo', 'gasoleo': 'gasóleo',
+            'GASO1L': 'GASOIL', 'GAS0IL': 'GASOIL',
+            'GASO1EO': 'GASÓLEO', 'GAS0LEO': 'GASÓLEO',
+            'DIES3L': 'DIESEL', 'D1ESEL': 'DIESEL', 'DIESE1': 'DIESEL',
+            # Gasolina
+            'GASO1INA': 'GASOLINA', 'GAS0LINA': 'GASOLINA',
+            # Electricidad
+            'E1ECTRICIDAD': 'ELECTRICIDAD', 'ELECTRIC1DAD': 'ELECTRICIDAD',
+            'ELECTR1CIDAD': 'ELECTRICIDAD',
+            # Agua
+            'SUMIN1STRO': 'SUMINISTRO', 'SUMINISTR0': 'SUMINISTRO',
+            # Servicios
+            'SERV1CIO': 'SERVICIO', 'SERVIC1O': 'SERVICIO',
+            'MANTEN1MIENTO': 'MANTENIMIENTO', 'MANTENIM1ENTO': 'MANTENIMIENTO',
+            'REPARAC1ON': 'REPARACIÓN', 'REPARAC1ÓN': 'REPARACIÓN',
+        }
+    }
+}
+
+
+@app.route('/api/dictionary/import', methods=['POST'])
+def api_dictionary_import():
+    """
+    Importa diccionarios desde:
+    - Diccionarios predefinidos (por nombre)
+    - URL de archivo JSON
+    - Archivo JSON subido
+
+    El JSON debe tener formato: {"wrong": "correct", ...}
+    """
+    try:
+        # Caso 1: Archivo subido
+        if 'file' in request.files:
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({'success': False, 'error': 'Empty filename'}), 400
+
+            try:
+                content = file.read().decode('utf-8')
+                corrections = json.loads(content)
+
+                if not isinstance(corrections, dict):
+                    return jsonify({
+                        'success': False,
+                        'error': 'Invalid format. Expected {"wrong": "correct", ...}'
+                    }), 400
+
+                # Añadir al diccionario custom
+                added = 0
+                for wrong, correct in corrections.items():
+                    if wrong not in OCR_CORRECTIONS:
+                        OCR_CORRECTIONS[wrong] = correct
+                        OCR_CORRECTIONS_CUSTOM[wrong] = correct
+                        added += 1
+
+                # Guardar diccionario
+                save_custom_dictionary()
+
+                return jsonify({
+                    'success': True,
+                    'message': f'Imported from file: {file.filename}',
+                    'imported': added,
+                    'total_in_file': len(corrections),
+                    'skipped': len(corrections) - added
+                })
+
+            except json.JSONDecodeError:
+                return jsonify({
+                    'success': False,
+                    'error': 'Invalid JSON file'
+                }), 400
+
+        # Caso 2: JSON body con URL o nombre de diccionario
+        data = request.get_json() or {}
+
+        # Importar desde URL
+        if 'url' in data:
+            url = data['url']
+            try:
+                import urllib.request
+                with urllib.request.urlopen(url, timeout=10) as response:
+                    content = response.read().decode('utf-8')
+                    corrections = json.loads(content)
+
+                    if not isinstance(corrections, dict):
+                        return jsonify({
+                            'success': False,
+                            'error': 'Invalid format in URL. Expected {"wrong": "correct", ...}'
+                        }), 400
+
+                    added = 0
+                    for wrong, correct in corrections.items():
+                        if wrong not in OCR_CORRECTIONS:
+                            OCR_CORRECTIONS[wrong] = correct
+                            OCR_CORRECTIONS_CUSTOM[wrong] = correct
+                            added += 1
+
+                    save_custom_dictionary()
+
+                    return jsonify({
+                        'success': True,
+                        'message': f'Imported from URL',
+                        'imported': added,
+                        'total_in_url': len(corrections)
+                    })
+
+            except Exception as e:
+                return jsonify({
+                    'success': False,
+                    'error': f'Error fetching URL: {str(e)}'
+                }), 400
+
+        # Importar diccionario predefinido
+        if 'dictionary' in data:
+            dict_name = data['dictionary']
+
+            if dict_name not in EXTERNAL_DICTIONARIES:
+                return jsonify({
+                    'success': False,
+                    'error': f'Unknown dictionary: {dict_name}',
+                    'available': list(EXTERNAL_DICTIONARIES.keys())
+                }), 400
+
+            ext_dict = EXTERNAL_DICTIONARIES[dict_name]
+            corrections = ext_dict.get('corrections', {})
+
+            added = 0
+            for wrong, correct in corrections.items():
+                if wrong not in OCR_CORRECTIONS:
+                    OCR_CORRECTIONS[wrong] = correct
+                    OCR_CORRECTIONS_CUSTOM[wrong] = correct
+                    added += 1
+
+            save_custom_dictionary()
+
+            return jsonify({
+                'success': True,
+                'message': f"Imported: {ext_dict['name']}",
+                'description': ext_dict.get('description', ''),
+                'imported': added,
+                'total_in_dictionary': len(corrections),
+                'skipped': len(corrections) - added
+            })
+
+        return jsonify({
+            'success': False,
+            'error': 'Provide file, url, or dictionary name'
+        }), 400
+
+    except Exception as e:
+        logger.error(f"[DICTIONARY IMPORT ERROR] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/dictionary/available')
+def api_dictionary_available():
+    """
+    Lista los diccionarios externos disponibles para importar
+    """
+    available = []
+    for key, value in EXTERNAL_DICTIONARIES.items():
+        available.append({
+            'id': key,
+            'name': value['name'],
+            'description': value.get('description', ''),
+            'count': len(value.get('corrections', {}))
+        })
+
+    return jsonify({
+        'success': True,
+        'dictionaries': available
+    })
 
 
 # ============================================================================

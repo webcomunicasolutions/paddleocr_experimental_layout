@@ -3,7 +3,7 @@
 ## Archivos Listos para GitHub
 
 ### Archivos Principales
-- [x] `app.py` (~3400 lineas) - Aplicacion completa con todas las funcionalidades
+- [x] `app.py` (~5000 lineas) - Aplicacion completa con todas las funcionalidades
 - [x] `Dockerfile` - Configuracion Docker optimizada
 - [x] `docker-compose.yml` - Orquestacion con volumenes para diccionarios
 - [x] `README.md` - Documentacion principal
@@ -31,6 +31,7 @@
   - `paddlex-models` - Modelos PaddleX
   - `paddleocr-models` - Modelos PaddleOCR
   - `ocr-dictionaries` - Diccionarios personalizados
+  - `ocr-config` - Configuracion persistente (API keys)
 - [x] .env.example con todas las variables
 
 ## Funcionalidades Implementadas
@@ -51,21 +52,25 @@
 - [x] Agrupacion por proximidad vertical (threshold 20px)
 
 ### Sistema de Diccionarios OCR
-- [x] Diccionario BASE con 60+ correcciones para:
-  - Ciudades espanolas (Cadiz, Cordoba, Almeria, etc.)
-  - Terminos fiscales (NIF, CIF, IVA, IRPF, etc.)
-  - Conceptos comunes (Total, Importe, Factura, etc.)
-  - Productos (Gasoleo, Gasolina, Electricidad, etc.)
+- [x] Diccionario BASE con 407 correcciones para:
+  - Ciudades espanolas (Cadiz, Cordoba, Almeria, Malaga, Sevilla, etc.)
+  - Terminos fiscales (NIF, CIF, IVA, IRPF, Base Imponible, etc.)
+  - Conceptos comunes (Total, Importe, Factura, Concepto, etc.)
+  - Productos (Gasoleo, Gasolina, Electricidad, Suministro, etc.)
+  - Confusiones OCR comunes (1↔l↔I, 0↔O, rn↔m, 5↔S, 8↔B)
 - [x] Diccionario PERSONALIZADO (persistente en Docker volume)
 - [x] Patron regex para correccion de precios (`:` -> `,`)
 - [x] API REST completa para gestion de diccionarios
 - [x] UI en Dashboard para visualizar/editar correcciones
+- [x] Importacion de diccionarios externos predefinidos
+- [x] Mejora con IA (Gemini Vision) para detectar correcciones
 
 ### Dashboard Web
-- [x] Tab "Estado" - Estadisticas del servidor
-- [x] Tab "Test OCR" - Subir y procesar documentos
-- [x] Tab "Diccionario" - Gestion de correcciones OCR
-- [x] Tab "Historial" - Ultimos procesamientos
+- [x] Tab "Estado" - Estadisticas del servidor en tiempo real
+- [x] Tab "Test OCR" - Subir y procesar documentos (Normal/Layout)
+- [x] Tab "Diccionario" - Gestion de correcciones OCR (BASE + CUSTOM)
+- [x] Tab "Mejorar Diccionario" - Flujo con IA para añadir correcciones
+- [x] Tab "Configuracion" - Gestion de API Key de Gemini
 - [x] Tab "Ayuda" - Documentacion y endpoints
 
 ### Endpoints API
@@ -87,6 +92,14 @@
 - [x] `POST /api/dictionary/reload` - Recargar desde archivos
 - [x] `POST /api/dictionary/test` - Probar correcciones en texto
 - [x] `POST /api/dictionary/analyze` - Analizar documento para errores
+- [x] `POST /api/dictionary/improve` - Corregir con Gemini Vision
+- [x] `POST /api/dictionary/import` - Importar diccionarios externos
+- [x] `GET /api/dictionary/available` - Listar diccionarios predefinidos
+
+#### Config API
+- [x] `GET /api/config/apikey` - Verificar si hay API key configurada
+- [x] `POST /api/config/apikey` - Guardar API key de Gemini
+- [x] `POST /api/config/apikey/test` - Probar si la API key funciona
 
 ## Pasos para Publicar
 
@@ -117,15 +130,16 @@ git add .
 git status
 
 # Primer commit
-git commit -m "Initial commit: PaddleOCR Fusion v3 with Layout Mode
+git commit -m "Initial commit: PaddleOCR Fusion v3.1 with Layout Mode
 
 Features:
 - PaddleOCR 3.x with PP-OCRv3 Spanish model
 - Layout mode for invoice/ticket text reconstruction
-- OCR Dictionary System with 60+ Spanish corrections
+- OCR Dictionary System with 407 Spanish corrections
+- AI-powered dictionary improvement (Gemini Vision)
 - Auto-recovery from std::exception errors
-- Professional REST API layer (10+ endpoints)
-- Interactive web dashboard
+- Professional REST API layer (15+ endpoints)
+- Interactive web dashboard with 6 tabs
 - Docker with persistent volumes
 
 Base: Paco's PaddleOCR 3.x project
@@ -155,17 +169,17 @@ Verifica que aparezcan:
 
 ```
 paddleocr-experimental-layout/
-├── README.md                    <- Documentacion principal
+├── README.md                    <- Documentacion principal (v3.1)
 ├── CLAUDE.md                    <- Guia de desarrollo
 ├── GITHUB_CHECKLIST.md          <- Este archivo
-├── VOLUMES_EXPLAINED.md         <- Explicacion de volumenes Docker
+├── VOLUMES_EXPLAINED.md         <- Explicacion de volumenes Docker (5 volumenes)
 ├── INVESTIGATION_NOTES.md       <- Notas de debug
 ├── LICENSE                      <- Licencia MIT
 ├── .gitignore                   <- Exclusiones
 ├── .env.example                 <- Plantilla de configuracion
-├── app.py                       <- Aplicacion principal (~3400 lineas)
-├── Dockerfile                   <- Docker build
-└── docker-compose.yml           <- Orquestacion Docker
+├── app.py                       <- Aplicacion principal (~5000 lineas)
+├── Dockerfile                   <- Docker build (con google-generativeai)
+└── docker-compose.yml           <- Orquestacion Docker (5 volumenes)
 ```
 
 ## Descripcion Sugerida para GitHub
@@ -182,6 +196,7 @@ Topics: paddleocr, ocr, rest-api, docker, python, opencv, preprocessing, n8n, fl
 
 ### Detailed Description (para README badges)
 ```markdown
+[![Version](https://img.shields.io/badge/version-3.1.0-blue.svg)](https://github.com/webcomunicasolutions/paddleocr-experimental-layout)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
 [![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/)
 [![PaddleOCR](https://img.shields.io/badge/PaddleOCR-3.x-orange.svg)](https://github.com/PaddlePaddle/PaddleOCR)
@@ -192,10 +207,11 @@ Professional REST API layer built on top of PaddleOCR 3.x with Layout Mode and O
 **Features:**
 - PaddleOCR 3.x with PP-OCRv3 Spanish model
 - Layout mode for invoice/ticket text reconstruction
-- OCR Dictionary System with 60+ Spanish corrections
+- OCR Dictionary System with 407 Spanish corrections
+- AI-powered dictionary improvement (Gemini Vision)
 - Auto-recovery from std::exception errors
-- Professional REST API layer (10+ endpoints)
-- Interactive web dashboard
+- Professional REST API layer (15+ endpoints)
+- Interactive web dashboard with 6 tabs
 - Docker with persistent volumes
 - n8n workflow integration
 ```
@@ -266,15 +282,22 @@ Todos los archivos estan preparados y documentados. Puedes proceder a publicar s
 ## Changelog
 
 ### v3.1.0 (2025-12-07)
-- Añadido: Sistema de diccionarios OCR (base + personalizado)
-- Añadido: API REST completa para diccionarios
+- Añadido: Sistema de diccionarios OCR (BASE + CUSTOM persistente)
+- Añadido: 407 correcciones para espanol (ciudades, terminos fiscales, confusiones OCR)
+- Añadido: Integracion Gemini Vision para mejora de diccionarios
+- Añadido: API REST completa para gestion de diccionarios (9 endpoints)
+- Añadido: API REST para configuracion (3 endpoints)
 - Añadido: Tab "Diccionario" en Dashboard
-- Añadido: Patron regex para correccion de precios
-- Añadido: 60+ correcciones para espanol (ciudades, terminos fiscales, etc.)
+- Añadido: Tab "Mejorar Diccionario" con flujo IA
+- Añadido: Tab "Configuracion" para API keys
+- Añadido: Importacion de diccionarios externos predefinidos
+- Añadido: Volumen Docker `ocr-config` para configuracion persistente
+- Añadido: Volumen Docker `ocr-dictionaries` para diccionarios personalizados
+- Añadido: Patron regex para correccion de precios (`:` -> `,`)
 - Corregido: Errores de sintaxis en f-strings de Python
 - Corregido: Auto-recuperacion mejorada para std::exception
 
 ### v3.0.0 (2025-12-06)
 - Añadido: Modo Layout experimental con coordenadas de bounding boxes
 - Añadido: Reconstruccion espacial de texto
-- Mejorado: Serialización JSON de numpy arrays
+- Mejorado: Serializacion JSON de numpy arrays

@@ -19,6 +19,9 @@ services:
       # Diccionarios OCR (personalizaciones persistentes)
       - ocr-dictionaries:/app/dictionaries
 
+      # Configuración (API keys, etc.)
+      - ocr-config:/app/config
+
       # OPCIONAL: Si quieres datos adicionales en /app/data
       # - /home/n8n/paddleocr-final/data/:/app/data/
     shm_size: 8g
@@ -88,4 +91,6 @@ volumes:
   paddleocr-models:
     driver: local
   ocr-dictionaries:
+    driver: local
+  ocr-config:
     driver: local

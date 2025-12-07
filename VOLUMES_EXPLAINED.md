@@ -1,16 +1,23 @@
-# 📁 Explicación de Volúmenes Docker
+# 📁 Explicación de Volúmenes Docker - PaddleOCR Fusion v3.1
 
 ## 🎯 Respuesta Rápida
 
-**Para el proyecto FUSION necesitas:**
+**Para el proyecto FUSION v3.1 necesitas:**
 
 ```yaml
 volumes:
-  - /home/n8n:/home/n8n                      # ← REQUERIDO
-  - paddlex-models:/home/n8n/.paddlex        # ← REQUERIDO
-  - paddleocr-models:/home/n8n/.paddleocr    # ← REQUERIDO
-  # OPCIONAL:
-  # - /home/n8n/paddleocr-final/data/:/app/data/
+  # REQUERIDO - Integración n8n
+  - /home/n8n:/home/n8n
+
+  # REQUERIDO - Cache de modelos
+  - paddlex-models:/home/n8n/.paddlex
+  - paddleocr-models:/home/n8n/.paddleocr
+
+  # NUEVO v3.1 - Sistema de diccionarios OCR
+  - ocr-dictionaries:/app/dictionaries
+
+  # NUEVO v3.1 - Configuración (API keys)
+  - ocr-config:/app/config
 ```
 
 ## 📊 Comparación de Versiones
@@ -45,7 +52,7 @@ volumes:
 - `/home/n8n/.paddlex` → Modelos PaddleX
 - `/home/n8n/.paddleocr` → Modelos PaddleOCR v3
 
-### Proyecto FUSION (nuevo)
+### Proyecto FUSION v3.1 (actual)
 
 ```yaml
 volumes:
@@ -55,6 +62,12 @@ volumes:
   # REQUERIDO: Cache de modelos
   - paddlex-models:/home/n8n/.paddlex
   - paddleocr-models:/home/n8n/.paddleocr
+
+  # NUEVO v3.1: Diccionarios OCR personalizados
+  - ocr-dictionaries:/app/dictionaries
+
+  # NUEVO v3.1: Configuración persistente (API keys)
+  - ocr-config:/app/config
 
   # OPCIONAL: Datos adicionales
   # - /home/n8n/paddleocr-final/data/:/app/data/
@@ -113,7 +126,67 @@ volumes:
 
 **Tamaño aproximado:** ~200-300MB
 
-### Volumen 4: `/home/n8n/paddleocr-final/data/:/app/data/` (OPCIONAL)
+### Volumen 4: `ocr-dictionaries:/app/dictionaries` (NUEVO v3.1)
+
+**¿Por qué es necesario?**
+- Almacena diccionarios OCR personalizados (CUSTOM)
+- Las correcciones añadidas desde el Dashboard se guardan aquí
+- Sin este volumen, los diccionarios personalizados se pierden al reiniciar
+
+**Tipo:** Named volume (gestionado por Docker)
+
+**Contenido:**
+```
+/app/dictionaries/
+├── custom_dictionary.json    ← Correcciones personalizadas
+└── (otros diccionarios importados)
+```
+
+**Gestión:**
+- Se puede editar desde Dashboard → Tab "Diccionario"
+- Se puede importar desde Dashboard o API
+- Endpoint: `POST /api/dictionary/add`
+- Endpoint: `POST /api/dictionary/remove`
+
+**Tamaño aproximado:** ~1-10KB (depende de correcciones añadidas)
+
+### Volumen 5: `ocr-config:/app/config` (NUEVO v3.1)
+
+**¿Por qué es necesario?**
+- Almacena configuración persistente (API keys, preferencias)
+- La API key de Gemini se guarda aquí de forma segura
+- Sin este volumen, hay que reconfigurar la API key tras cada reinicio
+
+**Tipo:** Named volume (gestionado por Docker)
+
+**Contenido:**
+```
+/app/config/
+└── api_keys.json    ← API keys (Gemini, etc.)
+```
+
+**Formato del archivo api_keys.json:**
+```json
+{
+    "gemini_api_key": "AIza...",
+    "configured_at": "2025-12-07T16:00:00"
+}
+```
+
+**Gestión:**
+- Se configura desde Dashboard → Tab "Configuración"
+- Endpoint: `GET /api/config/apikey` (verificar si existe)
+- Endpoint: `POST /api/config/apikey` (guardar)
+- Endpoint: `POST /api/config/apikey/test` (probar)
+
+**Seguridad:**
+- La API key NO se muestra en logs
+- El endpoint GET solo indica si está configurada, no devuelve la key
+- Se recomienda NO versionar este volumen
+
+**Tamaño aproximado:** ~1KB
+
+### Volumen 6: `/home/n8n/paddleocr-final/data/:/app/data/` (OPCIONAL)
 
 **¿Lo necesitas?**
 - ❓ Depende de si tu código usa `/app/data`
@@ -133,7 +206,31 @@ volumes:
 
 ## 🛠️ Configuración Recomendada
 
-### Opción 1: Solo lo necesario (RECOMENDADO)
+### Opción 1: Configuración completa v3.1 (RECOMENDADO)
+
+```yaml
+volumes:
+  # Integración n8n
+  - /home/n8n:/home/n8n
+
+  # Cache de modelos
+  - paddlex-models:/home/n8n/.paddlex
+  - paddleocr-models:/home/n8n/.paddleocr
+
+  # Sistema de diccionarios (v3.1)
+  - ocr-dictionaries:/app/dictionaries
+
+  # Configuración persistente (v3.1)
+  - ocr-config:/app/config
+```
+
+**Ventajas:**
+- ✅ Todas las funcionalidades habilitadas
+- ✅ Diccionarios personalizados persistentes
+- ✅ API keys persistentes (no hay que reconfigurar)
+- ✅ Mejora con IA disponible
+
+### Opción 2: Mínima (sin funciones v3.1)
 
 ```yaml
 volumes:
@@ -144,42 +241,31 @@ volumes:
 
 **Ventajas:**
 - ✅ Mínimo y funcional
-- ✅ Todo funciona (n8n + API REST)
-- ✅ Menos complejidad
+- ✅ OCR básico funciona
 
-### Opción 2: Con datos adicionales
+**Desventajas:**
+- ❌ Sin diccionarios personalizados persistentes
+- ❌ Sin configuración de API keys
+- ❌ Sin mejora con IA
+
+### Opción 3: Con datos adicionales
 
 ```yaml
 volumes:
   - /home/n8n:/home/n8n
   - paddlex-models:/home/n8n/.paddlex
   - paddleocr-models:/home/n8n/.paddleocr
+  - ocr-dictionaries:/app/dictionaries
+  - ocr-config:/app/config
   - /home/n8n/paddleocr-final/data/:/app/data/
 ```
 
 **Ventajas:**
+- ✅ Todas las funcionalidades
 - ✅ Compatible con scripts que usen `/app/data`
-- ✅ Mantiene estructura de tu versión anterior
 
 **Desventajas:**
-- ⚠️ Un volume adicional innecesario si no se usa
-
-### Opción 3: Datos dentro de /home/n8n (ALTERNATIVA)
-
-```yaml
-volumes:
-  - /home/n8n:/home/n8n
-  - paddlex-models:/home/n8n/.paddlex
-  - paddleocr-models:/home/n8n/.paddleocr
-
-# Y en lugar de /app/data, usa /home/n8n/data
-# Ya está incluido en el primer volume
-```
-
-**Ventajas:**
-- ✅ Todo centralizado en `/home/n8n`
-- ✅ Solo 3 volumes
-- ✅ Más simple de gestionar
+- ⚠️ Un volume adicional innecesario si no se usa `/app/data`
 
 ## 📝 Verificar Estructura
 
@@ -210,11 +296,13 @@ docker-compose up -d
 
 ```bash
 # Ver volumes creados
-docker volume ls | grep paddle
+docker volume ls | grep -E "paddle|ocr"
 
 # Debería mostrar:
-# paddleocr_webcomunicav3_fusion_paddlex-models
-# paddleocr_webcomunicav3_fusion_paddleocr-models
+# paddleocr_experimental_layout_paddlex-models
+# paddleocr_experimental_layout_paddleocr-models
+# paddleocr_experimental_layout_ocr-dictionaries
+# paddleocr_experimental_layout_ocr-config
 
 # Ver contenido de /home/n8n dentro del container
 docker exec paddlepaddle-cpu ls -la /home/n8n
@@ -225,6 +313,10 @@ docker exec paddlepaddle-cpu ls -la /home/n8n
 # drwxr-xr-x  pdf/
 # drwxr-xr-x  .paddlex/
 # drwxr-xr-x  .paddleocr/
+
+# Verificar directorios de configuración v3.1
+docker exec paddlepaddle-cpu ls -la /app/dictionaries
+docker exec paddlepaddle-cpu ls -la /app/config
 ```
 
 ## ❓ FAQ
@@ -284,25 +376,38 @@ volumes:
 
 ## ✅ Recomendación Final
 
-**Usa esta configuración:**
+**Usa esta configuración completa v3.1:**
 
 ```yaml
 volumes:
+  # Integración n8n (REQUERIDO)
   - /home/n8n:/home/n8n
+
+  # Cache de modelos (REQUERIDO)
   - paddlex-models:/home/n8n/.paddlex
   - paddleocr-models:/home/n8n/.paddleocr
+
+  # Sistema de diccionarios v3.1
+  - ocr-dictionaries:/app/dictionaries
+
+  # Configuración persistente v3.1
+  - ocr-config:/app/config
 ```
 
 **Por qué:**
-- ✅ Es lo mínimo necesario
-- ✅ Todo funciona (n8n + API REST)
-- ✅ Simple de mantener
-- ✅ Compatible con el código de Paco
-- ✅ Compatible con los nuevos endpoints
+- ✅ Todas las funcionalidades de v3.1
+- ✅ Diccionarios OCR personalizados persistentes
+- ✅ Configuración de API keys persistente
+- ✅ Mejora con IA (Gemini Vision) disponible
+- ✅ Compatible con n8n + API REST
+- ✅ Listo para producción
 
-**Si realmente necesitas `/app/data`:**
-- Añade la línea comentada en `docker-compose.yml`
-- Descomenta: `# - /home/n8n/paddleocr-final/data/:/app/data/`
+**Nuevas funcionalidades con estos volúmenes:**
+- 📚 407 correcciones OCR para español incluidas
+- ✏️ Añadir correcciones personalizadas desde Dashboard
+- 🤖 Mejorar diccionario con IA (Gemini Vision)
+- 🔑 Configurar API key una vez, persiste entre reinicios
+- 📦 Importar diccionarios externos predefinidos
 
 ---
 
