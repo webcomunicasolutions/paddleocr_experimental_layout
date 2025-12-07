@@ -5712,17 +5712,30 @@ def extract_invoice_fields(text):
             fields['invoice_number'] = match.group(1)
             break
 
-    # Estrategia 2: Patrones inline con etiquetas explícitas
+    # Estrategia 2: Patrones inline con etiquetas explícitas (v4.4 - Multi-language)
     if not fields.get('invoice_number'):
         invoice_patterns_inline = [
-            # Nº de factura: ON2025-584267 (con 'de' opcional, acepta guiones)
+            # Español
             r'N[°º]?\s*(?:DE\s+)?FACTURA[:\s]+([A-Z0-9\-]+)',
-            # Nº Factura: 12345678 o FACTURA Nº: 12345678
             r'(?:FACTURA\s*N[°º]?)[:\s]+([A-Z]{0,3}\d{6,}[A-Z0-9]*)',
-            # INVOICE: INV12345
-            r'\bINVOICE[:\s#]+([A-Z0-9\-/]+)',
-            # REF. FACTURA: (con límite de palabra para evitar 'reflejados')
+            r'(?:FACTURA)[:\s]+([A-Z0-9\-/]+\d+)',  # "Factura: 72011"
             r'\bREF\.?\s*(?:FACTURA)?[:\s]+([A-Z0-9\-/]+)',
+            # Inglés
+            r'\bINVOICE\s*(?:NUMBER|NO\.?|#|:)[:\s]*([A-Z0-9\-/]+)',
+            r'\bINVOICE[:\s#]+([A-Z0-9\-/]+)',
+            r'\bINV[#:\s]+([A-Z0-9\-/]+)',
+            r'\bINVOICE\s+ID[:\s]*([A-Z0-9\-/]+)',
+            r'(?:TAX\s+)?INVOICE[:\s]+([A-Z0-9\-/]+)',  # "Tax Invoice: ..."
+            # Alemán
+            r'\bRECHNUNG(?:\s*NR\.?|\s*NUMMER)?[:\s]*([A-Z0-9\-/]+)',
+            r'\bRE(?:CH)?\.?\s*NR\.?[:\s]*([A-Z0-9\-/]+)',
+            # Portugués
+            r'\bFATURA\s*(?:N[°º]?)?[:\s]*([A-Z0-9\-/]+)',
+            # Francés
+            r'\bFACTURE\s*(?:N[°º]?)?[:\s]*([A-Z0-9\-/]+)',
+            # Genérico con documento
+            r'\bDOCUMENT(?:\s*NUMBER|\s*NO\.?|\s*#)?[:\s]*([A-Z0-9\-/]+)',
+            r'\bORDER\s*(?:NUMBER|NO\.?|#)?[:\s]*([A-Z0-9\-/]+)',
         ]
         for pattern in invoice_patterns_inline:
             match = re.search(pattern, text_upper)
@@ -5966,31 +5979,101 @@ def extract_invoice_fields(text):
                 fields['vendor'] = line
 
     # =========================================================================
-    # CUSTOMER: Extraer nombre y NIF del cliente
+    # CUSTOMER: Extraer nombre y NIF del cliente (v4.4 - Multi-label support)
     # =========================================================================
-    # Buscar sección de cliente (después de "Cliente", "Datos del cliente", etc.)
+    # Etiquetas de sección de cliente en múltiples idiomas
+    customer_section_labels = [
+        # Español
+        'CLIENTE', 'DATOS CLIENTE', 'DATOS DEL CLIENTE', 'DATOS DE FACTURACIÓN',
+        'FACTURADO A', 'FACTURA A', 'DESTINATARIO', 'NOMBRE:', 'REF. CLIENTE',
+        'Nº CLIENTE', 'N° CLIENTE', 'NUMERO CLIENTE',
+        # Inglés
+        'BILL TO', 'BILLED TO', 'SOLD TO', 'CUSTOMER', 'CUSTOMER:', 'RECIPIENT',
+        'INVOICE TO', 'INVOICED TO', 'SHIP TO', 'DELIVER TO',
+        # Alemán (AnyDesk, etc.)
+        'RECHNUNGSADRESSE', 'KUNDENADRESSE', 'RECHNUNG AN',
+        # Portugués
+        'CLIENTE:', 'FATURADO A', 'DADOS DO CLIENTE',
+        # Francés
+        'FACTURÉ À', 'CLIENT:', 'DESTINATAIRE'
+    ]
+
+    # Etiquetas que indican el nombre del cliente en la misma línea
+    customer_name_inline_patterns = [
+        r'(?:FACTURADO\s*A|BILL\s*TO|SOLD\s*TO|RECIPIENT|DESTINATARIO)[:\s]+(.+)',
+        r'(?:CUSTOMER|CLIENTE)[:\s]+([A-Z][A-Za-z\s]+)',
+        r'(?:NOMBRE|NAME)[:\s]+(.+)',
+        r'(?:ATTN|ATTENTION)[:\s]+(.+)',
+    ]
+
     customer_section_start = -1
     for i, line in enumerate(lines):
         line_upper = line.upper().strip()
-        if any(x in line_upper for x in ['CLIENTE', 'DATOS CLIENTE', 'NOMBRE:', 'REF. CLIENTE']):
-            customer_section_start = i
-            break
 
-    if customer_section_start >= 0:
-        # Buscar nombre del cliente (línea después de "Nombre:" o primera línea con contenido)
+        # Primero intentar extraer nombre directamente de la línea con patrón inline
+        if not fields.get('customer_name'):
+            for pattern in customer_name_inline_patterns:
+                inline_match = re.search(pattern, line_upper)
+                if inline_match:
+                    extracted = inline_match.group(1).strip()
+                    # Verificar que no sea un NIF/CIF y tenga longitud razonable
+                    if len(extracted) > 3 and not re.match(r'^[A-Z]?\d{7,8}[A-Z]?$', extracted):
+                        # No incluir si parece ser el vendor
+                        if fields.get('vendor') and extracted.upper() in fields['vendor'].upper():
+                            continue
+                        fields['customer_name'] = extracted.title()
+                        customer_section_start = i
+                        logger.info(f"[KIE] customer_name extraído inline: {fields['customer_name']}")
+                        break
+
+        # Si encontramos etiqueta de sección pero no nombre inline, marcar inicio
+        if customer_section_start < 0:
+            if any(x in line_upper for x in customer_section_labels):
+                customer_section_start = i
+
+    if customer_section_start >= 0 and not fields.get('customer_name'):
+        # Buscar nombre del cliente en las líneas siguientes a la etiqueta
         for i in range(customer_section_start, min(customer_section_start + 10, len(lines))):
             line = lines[i].strip()
             line_upper = line.upper()
 
+            # Saltar líneas que son claramente etiquetas o vacías
+            if len(line) < 3:
+                continue
+            if any(x in line_upper for x in customer_section_labels):
+                continue
+            if re.match(r'^(NIF|CIF|N\.I\.F|C\.I\.F|VAT|TAX)', line_upper):
+                continue
+            if re.match(r'^[A-Z]?\d{7,8}[A-Z]?$', line.replace('.', '').replace(' ', '')):
+                continue  # Es un NIF/CIF
+
             # Buscar "Nombre: Juan Jose..."
             name_match = re.search(r'NOMBRE[:\s]*(.+)', line_upper)
             if name_match:
-                fields['customer_name'] = name_match.group(1).strip().title()
+                extracted = name_match.group(1).strip()
+                if len(extracted) > 3:
+                    fields['customer_name'] = extracted.title()
+                    logger.info(f"[KIE] customer_name extraído: {fields['customer_name']}")
                 continue
 
+            # Si la línea parece un nombre (letras, espacios, no es NIF)
+            if not fields.get('customer_name'):
+                # Verificar que parece nombre de persona/empresa
+                if re.match(r'^[A-ZÁÉÍÓÚÑ][a-záéíóúñA-ZÁÉÍÓÚÑ\s\.\,\-]{3,}$', line):
+                    # No debe ser el vendor
+                    if fields.get('vendor') and line.upper() in fields['vendor'].upper():
+                        continue
+                    # No debe contener palabras clave de factura
+                    skip_words = ['FACTURA', 'INVOICE', 'TOTAL', 'BASE', 'IVA', 'TAX', 'FECHA', 'DATE']
+                    if any(w in line.upper() for w in skip_words):
+                        continue
+                    fields['customer_name'] = line.title()
+                    logger.info(f"[KIE] customer_name detectado por posición: {fields['customer_name']}")
+                    break
+
             # Buscar NIF del cliente (diferente al del vendor)
-            if 'N.I.F' in line_upper or 'NIF' in line_upper:
-                nif_match = re.search(r'N\.?I\.?F\.?[:\s]*(\d{8}[A-Z])', line_upper)
+            if 'N.I.F' in line_upper or 'NIF' in line_upper or 'VAT' in line_upper:
+                nif_match = re.search(r'(?:N\.?I\.?F\.?|VAT|TAX\s*ID)[:\s]*([A-Z]?\d{7,8}[A-Z]?)', line_upper)
                 if nif_match:
                     customer_nif = nif_match.group(1)
                     # Verificar que no sea el mismo que el vendor
@@ -6060,6 +6143,15 @@ def extract_invoice_fields(text):
 
         # Ignorar líneas que son solo información adicional
         if line_stripped.startswith('(') or line_stripped.startswith('Total de días'):
+            continue
+
+        # v4.4: Ignorar líneas que son fechas de garantía (DMI format)
+        # Ejemplo: "01-12-2025" sola en una línea (fecha inicio/fin garantía)
+        if re.match(r'^\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4}$', line_stripped):
+            continue
+
+        # Ignorar líneas que empiezan con "Garantía" o son información de warranty
+        if any(kw in line_upper for kw in ['GARANTÍA', 'GARANTIA', 'WARRANTY', 'GEWÄHRLEISTUNG']):
             continue
 
         # =====================================================================
@@ -6169,6 +6261,18 @@ def extract_invoice_fields(text):
             seen.add(key)
             unique_items.append(item)
 
+    # v4.4: Post-procesamiento de descripciones
+    # - Limpiar fechas de garantía que aparecen al final de la descripción
+    # - Ejemplo: "IMPRESORA BROTHER HL-L2350DW 01-12-2025" → "IMPRESORA BROTHER HL-L2350DW"
+    for item in unique_items:
+        desc = item.get('description', '')
+        if desc:
+            # Eliminar fecha al final de la descripción (DD-MM-YYYY o DD/MM/YYYY)
+            desc_cleaned = re.sub(r'\s+\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4}\s*$', '', desc)
+            # Eliminar "Garantía: DD-MM-YYYY" al final
+            desc_cleaned = re.sub(r'\s*Garant[íi]a:?\s*\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4}\s*$', '', desc_cleaned, flags=re.IGNORECASE)
+            item['description'] = desc_cleaned.strip()
+
     # Validar coherencia: si hay cantidad y unit_price, verificar que coincida con amount
     for item in unique_items:
         if 'quantity' in item and 'unit_price' in item and 'amount' in item:
@@ -6187,12 +6291,15 @@ def extract_invoice_fields(text):
 
 def normalize_date(date_str):
     """
-    Normaliza cualquier formato de fecha español a DD/MM/YYYY.
+    Normaliza cualquier formato de fecha a DD/MM/YYYY (v4.4 - Multi-format support).
 
     Formatos soportados:
     - DD-MM-YY / DD/MM/YY → DD/MM/YYYY (asume 20XX para años < 50, 19XX para >= 50)
     - DD-MM-YYYY / DD/MM/YYYY → DD/MM/YYYY
+    - DD.MM.YYYY (formato alemán) → DD/MM/YYYY
     - DD MMM YYYY (ej: "05 NOV 2025") → DD/MM/YYYY
+    - MMM DD, YYYY (ej: "Sep 1, 2025") → DD/MM/YYYY
+    - YYYY-MM-DD (ISO) → DD/MM/YYYY
 
     Returns:
         dict: {'original': str, 'normalized': str, 'valid': bool}
@@ -6221,6 +6328,25 @@ def normalize_date(date_str):
         'DIC': '12', 'DICIEMBRE': '12'
     }
 
+    # Meses en inglés
+    months_en = {
+        'JAN': '01', 'JANUARY': '01',
+        'FEB': '02', 'FEBRUARY': '02',
+        'MAR': '03', 'MARCH': '03',
+        'APR': '04', 'APRIL': '04',
+        'MAY': '05',
+        'JUN': '06', 'JUNE': '06',
+        'JUL': '07', 'JULY': '07',
+        'AUG': '08', 'AUGUST': '08',
+        'SEP': '09', 'SEPT': '09', 'SEPTEMBER': '09',
+        'OCT': '10', 'OCTOBER': '10',
+        'NOV': '11', 'NOVEMBER': '11',
+        'DEC': '12', 'DECEMBER': '12'
+    }
+
+    # Combinar ambos diccionarios
+    all_months = {**months_es, **months_en}
+
     try:
         # Formato 1: DD-MM-YY o DD/MM/YY (año corto)
         match = re.match(r'^(\d{1,2})[-/](\d{1,2})[-/](\d{2})$', date_str)
@@ -6241,26 +6367,70 @@ def normalize_date(date_str):
             result['valid'] = True
             return result
 
-        # Formato 3: DD MMM YYYY (ej: "05 NOV 2025")
+        # Formato 3: DD.MM.YYYY (formato alemán - AnyDesk, etc.)
+        match = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', date_str)
+        if match:
+            day, month, year = match.groups()
+            result['normalized'] = f"{day.zfill(2)}/{month.zfill(2)}/{year}"
+            result['valid'] = True
+            return result
+
+        # Formato 4: DD.MM.YY (formato alemán corto)
+        match = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{2})$', date_str)
+        if match:
+            day, month, year = match.groups()
+            year_int = int(year)
+            full_year = 2000 + year_int if year_int < 50 else 1900 + year_int
+            result['normalized'] = f"{day.zfill(2)}/{month.zfill(2)}/{full_year}"
+            result['valid'] = True
+            return result
+
+        # Formato 5: DD MMM YYYY (ej: "05 NOV 2025", "31 JUL 2025")
         match = re.match(r'^(\d{1,2})\s+([A-Z]+)\s+(\d{4})$', date_str)
         if match:
             day, month_name, year = match.groups()
-            # Buscar el mes en el diccionario
-            for key, value in months_es.items():
+            # Buscar el mes en el diccionario combinado
+            for key, value in all_months.items():
                 if month_name.startswith(key):
                     result['normalized'] = f"{day.zfill(2)}/{value}/{year}"
                     result['valid'] = True
                     return result
 
-        # Formato 4: DD de MMM de YYYY (ej: "05 de noviembre de 2025")
-        match = re.match(r'^(\d{1,2})\s+(?:DE\s+)?([A-Z]+)\s+(?:DE\s+)?(\d{4})$', date_str)
+        # Formato 6: MMM DD, YYYY (ej: "Sep 1, 2025", "AUGUST 15, 2025")
+        match = re.match(r'^([A-Z]+)\s+(\d{1,2}),?\s+(\d{4})$', date_str)
         if match:
-            day, month_name, year = match.groups()
-            for key, value in months_es.items():
+            month_name, day, year = match.groups()
+            for key, value in all_months.items():
                 if month_name.startswith(key):
                     result['normalized'] = f"{day.zfill(2)}/{value}/{year}"
                     result['valid'] = True
                     return result
+
+        # Formato 7: DD de MMM de YYYY (ej: "05 de noviembre de 2025", "04 JULIO 2025")
+        match = re.match(r'^(\d{1,2})\s+(?:DE\s+)?([A-Z]+)\s+(?:DE\s+)?(\d{4})$', date_str)
+        if match:
+            day, month_name, year = match.groups()
+            for key, value in all_months.items():
+                if month_name.startswith(key):
+                    result['normalized'] = f"{day.zfill(2)}/{value}/{year}"
+                    result['valid'] = True
+                    return result
+
+        # Formato 8: YYYY-MM-DD (ISO format)
+        match = re.match(r'^(\d{4})-(\d{1,2})-(\d{1,2})$', date_str)
+        if match:
+            year, month, day = match.groups()
+            result['normalized'] = f"{day.zfill(2)}/{month.zfill(2)}/{year}"
+            result['valid'] = True
+            return result
+
+        # Formato 9: YYYY/MM/DD (ISO variant)
+        match = re.match(r'^(\d{4})/(\d{1,2})/(\d{1,2})$', date_str)
+        if match:
+            year, month, day = match.groups()
+            result['normalized'] = f"{day.zfill(2)}/{month.zfill(2)}/{year}"
+            result['valid'] = True
+            return result
 
     except Exception as e:
         pass
