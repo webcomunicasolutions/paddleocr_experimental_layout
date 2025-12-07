@@ -4,10 +4,10 @@
 
 ## Estado Actual del Proyecto
 
-### Versión: 4.1 (Optimización de Rendimiento)
-### Próximo objetivo: v4.2 (LINE_ITEMS Avanzado)
+### Versión: 4.2 (LINE_ITEMS Avanzado)
+### Próximo objetivo: v4.3 (Post-procesamiento y Normalización)
 
-**ÚLTIMA ACTUALIZACIÓN:** 2025-12-07 - v4.1 completada con circuit breaker y timeout inteligente.
+**ÚLTIMA ACTUALIZACIÓN:** 2025-12-07 - v4.2 completada con LINE_ITEMS multi-formato.
 
 ---
 
@@ -32,23 +32,37 @@
   - Ejecución en thread separado
 - **Fallback automático** a OCR básico si PP-Structure falla
 
+### v4.2 - LINE_ITEMS Avanzado ✅
+- **Detección de zona de productos** (headers: Detalle, Descripción, etc.)
+- **4 patrones de extracción**:
+  - Patrón 1: Vodafone/DMI (Código + Descripción + Cantidad + Precio + Importe)
+  - Patrón 2: Cantidad primero (Qty + Descripción + Precio + Importe)
+  - Patrón 3: Olivenet (Concepto + Importe, sin cantidad)
+  - Patrón 4: Simple (Texto + Importe)
+- **Detección de descuentos** (importes negativos o palabra DESCUENTO)
+- **Validación de importes** (cantidad × precio_unitario ≈ importe)
+- **Resultados de pruebas**:
+  - Olivenet: 9 items (incluyendo descuentos) ✅
+  - Vodafone: 2 items con validación ✅
+  - Tickets escaneados: Pendiente mejora
+
 ---
 
-## PRÓXIMO: v4.2 - LINE_ITEMS Avanzado
+## PRÓXIMO: v4.3 - Post-procesamiento y Normalización
 
 ### Objetivo
-Extraer conceptos/productos completos para reproducir facturas:
-- Descripción del producto/servicio
-- Cantidad
-- Precio unitario
-- Importe (cantidad × precio)
-- IVA aplicado por línea (si aplica)
+Limpieza y normalización del texto extraído:
+- Eliminar artefactos de OCR
+- Normalizar formatos de fecha (→ ISO YYYY-MM-DD)
+- Normalizar importes (→ 1234.56)
+- Validar NIFs (formato + dígito de control)
 
 ### Plan de implementación
-1. Detectar cabeceras de tabla (Concepto, Cantidad, Precio, Importe)
-2. Mapear columnas automáticamente usando coordenadas X
-3. Extraer cada línea con todos sus campos
-4. Validar coherencia (cantidad × precio = importe)
+1. Detectar y corregir palabras cortadas entre líneas
+2. Unificar espacios y saltos de línea
+3. Convertir fechas a formato ISO
+4. Normalizar importes a formato numérico estándar
+5. Validar NIFs españoles
 
 ---
 
@@ -57,13 +71,13 @@ Extraer conceptos/productos completos para reproducir facturas:
 | Endpoint | Descripción | Uso principal |
 |----------|-------------|---------------|
 | `/process` | OCR con formato | `format=layout` para IA |
-| `/extract` | Extracción KIE | JSON estructurado |
+| `/extract` | Extracción KIE | JSON estructurado con LINE_ITEMS |
 | `/structure` | PP-Structure | Tablas HTML + layout |
 | `/ocr` | Original Paco | Compatibilidad n8n |
 
 ---
 
-## UBICACIONES CLAVE EN app.py (~6000 líneas)
+## UBICACIONES CLAVE EN app.py (~6100 líneas)
 
 | Función | Línea (aprox) | Descripción |
 |---------|---------------|-------------|
@@ -74,6 +88,28 @@ Extraer conceptos/productos completos para reproducir facturas:
 | `detect_columns_dbscan()` | ~2417 | Clustering de columnas |
 | `format_text_with_layout()` | ~2450 | Reconstrucción espacial |
 | `extract_invoice_fields()` | ~5600 | KIE - extracción campos |
+| `extract_line_items()` | ~6005 | LINE_ITEMS v4.2 |
+
+---
+
+## LINE_ITEMS v4.2 - PATRONES
+
+```python
+# Patrón 1: Vodafone/DMI - Código + Descripción + Qty + Precio + Importe
+r'^([A-Z]{2}\d+|\d+)\s+(.+?)\s+(\d+)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})\s*€?'
+
+# Patrón 2: Cantidad primero
+r'^(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})\s*€?'
+
+# Patrón 3: Olivenet - Concepto + Importe
+r'^(.+?)\s{2,}(-?\d+[.,]\d{2,4})\s*€?'
+
+# Patrón 4: Simple - Texto + Importe
+r'(.+?)\s+(-?\d+[.,]\d{2})\s*€?\s*$'
+
+# Descuentos: amount < 0 OR 'DESCUENTO' in description
+# Validación: |quantity × unit_price - amount| < 0.02
+```
 
 ---
 
@@ -83,7 +119,7 @@ Extraer conceptos/productos completos para reproducir facturas:
 # Health check
 curl http://localhost:8503/health
 
-# Test /extract
+# Test /extract (incluye LINE_ITEMS)
 curl -X POST http://localhost:8503/extract -F "file=@factura.pdf"
 
 # Test /process layout
@@ -146,11 +182,19 @@ timeout = min(60 + (file_size // 500000) * 30, 120)
 
 ```
 /mnt/c/PROYECTOS CLAUDE/paddleocr/facturas_prueba/
-├── ticket.pdf                # Escaneado, gasolinera ✅
-├── Factura noviembre.pdf     # Vectorial, Olivenet ✅
-├── Factura_VFR25087570.pdf   # Vectorial, Vodafone ✅
+├── ticket.pdf                # Escaneado, gasolinera (LINE_ITEMS pendiente)
+├── Factura noviembre.pdf     # Vectorial, Olivenet ✅ 9 items
+├── Factura_VFR25087570.pdf   # Vectorial, Vodafone ✅ 2 items
 └── CamScanner*.pdf           # Escaneado grande
 ```
+
+---
+
+## TAREAS PENDIENTES FUTURAS
+
+1. **std::exception en PaddleOCR** - Investigar causa raíz
+2. **Recuperación de errores C++** - Mejorar en OCR principal
+3. **LINE_ITEMS para tickets** - El OCR no preserva estructura tabular
 
 ---
 
@@ -158,7 +202,8 @@ timeout = min(60 + (file_size // 500000) * 30, 120)
 
 1. Leer este archivo primero
 2. Ver `ROADMAP_v4.1.md` para próximos pasos
-3. Estado actual: **v4.1 completada, listo para v4.2**
-4. Siguiente tarea: **LINE_ITEMS avanzado**
-   - Extraer cantidad, precio unitario, importe por línea
-   - Detectar estructura tabular de items
+3. Estado actual: **v4.2 completada, listo para v4.3**
+4. Siguiente tarea: **Post-procesamiento y normalización**
+   - Limpieza de artefactos OCR
+   - Normalización de fechas e importes
+   - Validación de NIFs
