@@ -4,10 +4,10 @@
 
 ## Estado Actual del Proyecto
 
-### Versión: 4.3 (Normalización y Validación)
-### Próximo objetivo: Sistema de validación con agentes
+### Versión: 4.3 (Normalización y Validación) - ESTABLE
+### Próximo objetivo: Sistema de validación con agentes (~100 facturas)
 
-**ÚLTIMA ACTUALIZACIÓN:** 2025-12-07 - v4.3 completada con normalización de fechas, validación de NIFs y normalización de importes.
+**ÚLTIMA ACTUALIZACIÓN:** 2025-12-07 - v4.3 completada y subida a GitHub.
 
 ---
 
@@ -43,36 +43,24 @@
 - **Validación de importes** (cantidad × precio_unitario ≈ importe)
 
 ### v4.3 - Normalización y Validación ✅
-- **normalize_date()**: Convierte fechas a DD-MM-YYYY
-  - DD-MM-YY / DD/MM/YY → DD-MM-YYYY (expande años cortos)
-  - DD-MM-YYYY / DD/MM/YYYY → DD-MM-YYYY
-  - DD MMM YYYY (ej: "05 NOV 2025") → DD-MM-YYYY
+- **normalize_date()**: Convierte fechas a DD/MM/YYYY
+  - DD-MM-YY / DD/MM/YY → DD/MM/YYYY
+  - DD-MM-YYYY / DD/MM/YYYY → DD/MM/YYYY
+  - DD MMM YYYY (ej: "05 NOV 2025") → DD/MM/YYYY
 - **validate_spanish_nif()**: Valida NIFs/CIFs españoles
   - NIF persona física: 8 dígitos + letra (validación de letra)
   - NIE extranjeros: X/Y/Z + 7 dígitos + letra
   - CIF empresas: letra + 7 dígitos + control
-- **normalize_amount()**: Normaliza importes a float
-  - Formato español (1.234,56) → 1234.56
-  - Elimina símbolos de moneda
-- **Integración automática** en endpoint /extract
-  - Nuevos campos: date_normalized, vendor_nif_valid, vendor_nif_type
-
----
-
-## PRÓXIMO: Sistema de Validación con Agentes
-
-### Objetivo
-Cuando el usuario suba ~100 facturas de prueba:
-1. Procesar cada factura con PaddleOCR (/extract)
-2. Usar Claude Vision para validar resultados
-3. Comparar y generar reporte de precisión
-4. Identificar patrones de errores
-
-### Plan de implementación
-1. Crear endpoint /batch-validate o script de validación
-2. Procesar facturas en lote
-3. Usar API de Claude Vision para verificar
-4. Generar reporte con métricas de precisión
+- **normalize_amount()**: Normaliza importes con moneda
+  - Detecta moneda: EUR (€), USD ($), GBP (£), CHF, MXN
+  - Formato: "66.83 EUR"
+- **detect_currency()**: Detecta moneda predominante en documento
+- **Campos añadidos**:
+  - `date_normalized`: "21/08/2025"
+  - `currency`: "EUR"
+  - `total_formatted`: "66.83 EUR"
+  - `vendor_nif_valid`: true/false
+  - `vendor_nif_type`: "CIF"/"NIF"/"NIE"
 
 ---
 
@@ -87,7 +75,7 @@ Cuando el usuario suba ~100 facturas de prueba:
 
 ---
 
-## UBICACIONES CLAVE EN app.py (~6500 líneas)
+## UBICACIONES CLAVE EN app.py (~6600 líneas)
 
 | Función | Línea (aprox) | Descripción |
 |---------|---------------|-------------|
@@ -95,38 +83,86 @@ Cuando el usuario suba ~100 facturas de prueba:
 | `check_circuit_breaker()` | ~5113 | Verificar estado CB |
 | `run_pp_structure_with_retry()` | ~5202 | Ejecutar con retry+timeout |
 | `extract_invoice_fields()` | ~5648 | KIE - extracción campos |
-| `normalize_date()` | ~6185 | Normalizar fechas DD-MM-YYYY |
-| `validate_spanish_nif()` | ~6268 | Validar NIFs/CIFs |
-| `normalize_amount()` | ~6366 | Normalizar importes |
-| `normalize_fields()` | ~6421 | Aplicar toda normalización |
+| `normalize_date()` | ~6188 | Normalizar fechas DD/MM/YYYY |
+| `validate_spanish_nif()` | ~6271 | Validar NIFs/CIFs |
+| `normalize_amount()` | ~6369 | Normalizar importes con moneda |
+| `detect_currency()` | ~6442 | Detectar moneda del documento |
+| `normalize_fields()` | ~6473 | Aplicar toda normalización |
 
 ---
 
-## NORMALIZACIÓN v4.3
+## NORMALIZACIÓN v4.3 - EJEMPLOS
 
-### Fechas (normalize_date)
-```python
-# Entrada → Salida
-"21-08-25"    → "21-08-2025"
-"05/11/2025"  → "05-11-2025"
-"19/11/25"    → "19-11-2025"
-"05 NOV 2025" → "05-11-2025"
+### Fechas (DD/MM/YYYY)
+```
+"21-08-25"    → "21/08/2025"
+"05/11/2025"  → "05/11/2025"
+"19/11/25"    → "19/11/2025"
+"05 NOV 2025" → "05/11/2025"
 ```
 
-### NIFs (validate_spanish_nif)
-```python
-# Tipos detectados
-"78971220F"  → NIF (persona física) - control_check: True/False
-"B93340198"  → CIF (empresa) - control_check: True/False
-"X1234567L"  → NIE (extranjero) - control_check: True/False
+### NIFs (con validación)
+```
+"78971220F"  → NIF (persona física) - control_check: true
+"B93340198"  → CIF (empresa) - control_check: true
+"X1234567L"  → NIE (extranjero) - control_check: true/false
 ```
 
-### Importes (normalize_amount)
-```python
-# Entrada → Salida
-"94,74 €"    → 94.74
-"1.234,56"   → 1234.56  # formato español
-"-12.3967 €" → -12.40   # redondeo
+### Importes (con moneda)
+```
+66.83     → "66.83 EUR"
+"94,74 €" → "94.74 EUR"
+"$150.00" → "150.00 USD"
+"£75.50"  → "75.50 GBP"
+"-12.40"  → "-12.40 EUR"
+```
+
+---
+
+## RESPUESTA JSON DE /extract
+
+```json
+{
+  "success": true,
+  "document_type": "invoice",
+  "extraction_method": "pdftotext_layout",
+  "fields": {
+    "vendor": "OLIVENET NETWORK S.L.U.",
+    "vendor_nif": "B93340198",
+    "vendor_nif_valid": true,
+    "vendor_nif_type": "CIF",
+    "customer_nif": "78971220F",
+    "customer_nif_valid": true,
+    "customer_nif_type": "NIF",
+    "invoice_number": "ON2025-584267",
+    "date": "05/11/2025",
+    "date_normalized": "05/11/2025",
+    "total": 94.74,
+    "total_formatted": "94.74 EUR",
+    "tax_base": 78.3,
+    "tax_base_formatted": "78.30 EUR",
+    "tax_rate": 21.0,
+    "tax_amount": 16.44,
+    "tax_amount_formatted": "16.44 EUR",
+    "currency": "EUR",
+    "line_items": [
+      {
+        "description": "Static IP (01/10/2025 - 31/10/2025)",
+        "amount": 15.0,
+        "amount_normalized": 15.0,
+        "amount_formatted": "15.00 EUR"
+      }
+    ],
+    "_normalized": {
+      "version": "4.3",
+      "currency": "EUR",
+      "date": {"original": "05/11/2025", "normalized": "05/11/2025", "valid": true},
+      "vendor_nif": {"original": "B93340198", "type": "CIF", "control_check": true},
+      "amounts": {...}
+    }
+  },
+  "confidence": {"score": 1.0, "level": "high"}
+}
 ```
 
 ---
@@ -140,13 +176,15 @@ curl http://localhost:8503/health
 # Test /extract con normalización v4.3
 curl -X POST http://localhost:8503/extract -F "file=@factura.pdf"
 
-# Ver campos normalizados específicos
+# Ver campos normalizados
 curl -X POST http://localhost:8503/extract -F "file=@factura.pdf" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 f=d['fields']
 print(f'Fecha: {f.get(\"date\")} → {f.get(\"date_normalized\")}')
-print(f'NIF Vendor: {f.get(\"vendor_nif\")} - Válido: {f.get(\"vendor_nif_valid\")}')
+print(f'Moneda: {f.get(\"currency\")}')
+print(f'Total: {f.get(\"total_formatted\")}')
+print(f'NIF válido: {f.get(\"vendor_nif_valid\")}')
 "
 
 # Ver logs
@@ -154,6 +192,24 @@ docker logs --tail 100 paddlepaddle-cpu
 
 # Rebuild completo
 docker-compose down && docker-compose build --no-cache && docker-compose up -d
+
+# Copiar app.py actualizado
+docker cp app.py paddlepaddle-cpu:/app/app.py && docker restart paddlepaddle-cpu
+```
+
+---
+
+## COMMITS EN GITHUB
+
+```
+7d89c58 fix: Formato de fecha DD/MM/YYYY y detección de moneda
+945530f docs: Actualizar SESSION_CONTEXT.md con estado v4.3 completada
+165e86b feat: v4.3 - Normalización y Validación de Campos
+259d2f7 docs: Actualizar SESSION_CONTEXT.md con estado v4.2 completada
+1b2ca50 feat: v4.2 - LINE_ITEMS Advanced con soporte multi-formato
+bd946e1 docs: Actualizar SESSION_CONTEXT.md con estado v4.1
+fb1a313 feat: v4.1 - Optimización de rendimiento PP-Structure
+ab5cabb fix: Actualizar todas las referencias a v4 en el dashboard
 ```
 
 ---
@@ -162,9 +218,9 @@ docker-compose down && docker-compose build --no-cache && docker-compose up -d
 
 ```
 /mnt/c/PROYECTOS CLAUDE/paddleocr/facturas_prueba/
-├── ticket.pdf                # Escaneado - 21-08-25 → 21-08-2025 ✅
-├── Factura noviembre.pdf     # Olivenet - 05/11/2025 → 05-11-2025 ✅
-├── Factura_VFR25087570.pdf   # Vodafone - 19/11/25 → 19-11-2025 ✅
+├── ticket.pdf                # Escaneado - 21/08/2025 ✅ EUR
+├── Factura noviembre.pdf     # Olivenet - 05/11/2025 ✅ EUR
+├── Factura_VFR25087570.pdf   # Vodafone - 19/11/2025 ✅ EUR
 └── CamScanner*.pdf           # Escaneado grande
 ```
 
@@ -175,15 +231,19 @@ docker-compose down && docker-compose build --no-cache && docker-compose up -d
 1. **std::exception en PaddleOCR** - Investigar causa raíz
 2. **Recuperación de errores C++** - Mejorar en OCR principal
 3. **LINE_ITEMS para tickets** - El OCR no preserva estructura tabular
-4. **Sistema de validación con agentes** - Para pruebas masivas con ~100 facturas
+4. **Sistema de validación** - Para pruebas masivas con ~100 facturas
+   - Procesar con PaddleOCR
+   - Validar con Claude Vision
+   - Generar reporte de precisión
 
 ---
 
 ## SI SE CORTA LA COMUNICACIÓN
 
 1. Leer este archivo primero
-2. Estado actual: **v4.3 completada**
-3. Siguiente tarea: **Sistema de validación con agentes**
-   - Usuario quiere subir ~100 facturas para pruebas
+2. Estado actual: **v4.3 ESTABLE - Todo subido a GitHub**
+3. Branch: `main` - Sincronizado con origin
+4. Siguiente tarea: **Sistema de validación con ~100 facturas**
+   - Usuario subirá facturas de prueba
    - Usar PaddleOCR + Claude Vision para validar
-   - Generar reporte de precisión
+   - Comparar y generar métricas de precisión
