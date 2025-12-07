@@ -1,6 +1,6 @@
-# CLAUDE.md - Development Guide
+# CLAUDE.md
 
-This file provides guidance to Claude Code when working with the PaddleOCR Fusion v3 codebase.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -11,303 +11,184 @@ This file provides guidance to Claude Code when working with the PaddleOCR Fusio
 ```
 ┌─────────────────────────────────────────────┐
 │         API REST Layer (Added)              │
-│  Lines 1774-2312                            │
-│  ┌──────┬──────┬────────┬─────────┬────┐  │
-│  │  /   │/stats│/process│/analyze │... │  │
-│  └──────┴──────┴────────┴─────────┴────┘  │
+│  Lines ~1895-2895                           │
+│  ┌──────┬──────┬────────┬─────────┬────┐   │
+│  │  /   │/stats│/process│/analyze │... │   │
+│  └──────┴──────┴────────┴─────────┴────┘   │
 │                  ↓                          │
 ├─────────────────────────────────────────────┤
-│   Core Processing (Paco's Base - Untouched)│
-│  Lines 1-1773                               │
+│   Core Processing (Paco's Base)             │
+│  Lines 1-~1894                              │
 │  • PaddleOCR 3.x via PaddleX               │
 │  • OpenCV preprocessing                     │
-│  • Perspective correction                   │
-│  • Orientation correction                   │
-│  • Deskew correction                        │
-│  • Multi-page processing                    │
-│  • n8n integration                          │
-│  • Original /ocr endpoint                   │
+│  • Perspective/orientation/deskew correction│
+│  • Multi-page PDF processing                │
+│  • n8n integration (/ocr endpoint)          │
 └─────────────────────────────────────────────┘
 ```
 
-## Key Files Structure
-
-### app.py (2331 lines total)
-
-**Lines 1-1773: Paco's Base (UNTOUCHED)**
-- All imports and configuration
-- OpenCV preprocessing functions
-- PaddlePaddle orientation correction
-- ImageMagick deskew
-- PDF processing functions
-- `/health` endpoint (line 1635)
-- `/ocr` endpoint (line 1647-1772)
-
-**Lines 1774-2312: API REST Layer (ADDED)**
-- `server_stats` dictionary (line 1780)
-- `GET /` - Dashboard (line 1788)
-- `GET /stats` - Statistics (line 2022)
-- `POST /process` - REST wrapper (line 2053)
-- `POST /analyze` - Detailed analysis (line 2186)
-- Startup logging enhancements (line 2314)
-
-### Other Files
-
-- `Dockerfile` - From Paco (unchanged)
-- `docker-compose.yml` - From Paco (unchanged)
-- `README.md` - New documentation
-- `.env.example` - Environment variables template
-- `.gitignore` - Git exclusions
-
-## Important Notes
-
-### What NOT to Modify
-
-❌ **DO NOT modify lines 1-1773** unless fixing critical bugs. This is Paco's proven processing logic.
-
-### What You Can Modify
-
-✅ **Lines 1774-2312**: API REST layer
-- Add new endpoints
-- Modify dashboard HTML
-- Add statistics
-- Improve error handling
-
-## Adding New Endpoints
-
-Template for adding new REST endpoints (add after line 2307):
-
-```python
-@app.route('/your-endpoint', methods=['POST'])
-def your_endpoint():
-    """Your endpoint description"""
-    global server_stats
-    start_time = time.time()
-    server_stats['total_requests'] += 1
-
-    temp_file_path = None
-
-    try:
-        # 1. Validate file
-        if 'file' not in request.files:
-            server_stats['failed_requests'] += 1
-            return jsonify({'error': 'No file provided'}), 400
-
-        # 2. Save to /home/n8n/in
-        n8nHomeDir = '/home/n8n'
-        temp_filename = f"temp_{int(time.time())}_{file.filename}"
-        temp_file_path = f"{n8nHomeDir}/in/{temp_filename}"
-        file.save(temp_file_path)
-
-        # 3. Call /ocr internally
-        with app.test_request_context('/ocr', method='POST',
-                                     data={'filename': temp_file_path}):
-            response = ocr()
-            response_json = response.get_json() if not isinstance(response, tuple) else response[0].get_json()
-
-        # 4. Cleanup temp files
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-
-        # 5. Process and return
-        processing_time = time.time() - start_time
-        server_stats['total_processing_time'] += processing_time
-
-        if response_json.get('success'):
-            server_stats['successful_requests'] += 1
-            return jsonify({
-                'success': True,
-                'your_data': 'processed',
-                'processing_time': round(processing_time, 3)
-            })
-        else:
-            server_stats['failed_requests'] += 1
-            return jsonify({'error': response_json.get('error')}), 500
-
-    except Exception as e:
-        server_stats['failed_requests'] += 1
-        logger.error(f"[YOUR_ENDPOINT ERROR] {e}")
-
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-
-        return jsonify({'error': str(e)}), 500
-```
-
-## Endpoint Flow
-
-All new REST endpoints follow this pattern:
-
-1. **Receive multipart file** from HTTP request
-2. **Save to /home/n8n/in/** (temporary)
-3. **Call /ocr endpoint** internally (Paco's logic)
-4. **Cleanup temp files**
-5. **Format response** for REST API
-6. **Update statistics**
-
-This ensures we leverage 100% of Paco's processing without duplicating code.
-
-## Output Formats
-
-The `/process` endpoint accepts a `format` parameter but currently both modes return the same result.
-
-### Normal (default)
-Plain text extraction. The OCR text is returned as-is.
+## Build and Run Commands
 
 ```bash
-curl -X POST http://localhost:8503/process \
-  -F "file=@factura.pdf" \
-  -F "format=normal"
-```
+# Build and start
+docker-compose build && docker-compose up -d
 
-### Layout (PENDING - returns same as Normal)
-**Status:** Not yet implemented. Currently returns the same result as Normal.
-
-**Why?** The basic text post-processing approach was tested but didn't improve results because:
-1. The OCR doesn't preserve X,Y coordinates through the pipeline
-2. Text columns get separated (concepts in one block, prices in another)
-3. Post-processing can't reconstruct spatial relationships without coordinates
-
-**Future:** Will be implemented with PP-Structure in the experimental repository, using bounding box coordinates for real layout reconstruction.
-
-## Testing
-
-### Test Dashboard
-```bash
-curl http://localhost:8503/
-```
-
-### Test Health
-```bash
-curl http://localhost:8503/health | jq
-```
-
-### Test Stats
-```bash
-curl http://localhost:8503/stats | jq
-```
-
-### Test Process - Normal format
-```bash
-curl -X POST http://localhost:8503/process \
-  -F "file=@test.pdf" \
-  -F "format=normal"
-```
-
-### Test Process - Layout format (for invoices)
-```bash
-curl -X POST http://localhost:8503/process \
-  -F "file=@factura.pdf" \
-  -F "format=layout"
-```
-
-### Test Analyze
-```bash
-curl -X POST http://localhost:8503/analyze \
-  -F "file=@test.pdf" | jq -r '.ultra_analysis'
-```
-
-### Test Original /ocr (n8n)
-```bash
-curl -X POST http://localhost:8503/ocr \
-  -F "filename=/home/n8n/in/test.pdf"
-```
-
-## Docker Commands
-
-```bash
-# Build
-docker-compose build
-
-# Start
-docker-compose up -d
-
-# Logs
+# View logs
 docker-compose logs -f
 
 # Stop
 docker-compose down
 
-# Rebuild
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
+# Full rebuild (no cache)
+docker-compose down && docker-compose build --no-cache && docker-compose up -d
+
+# Enter container shell
+docker exec -it paddlepaddle-cpu bash
 ```
 
-## Common Issues
+## Testing Endpoints
 
-### Issue: Dashboard not loading
-**Solution**: Check Flask is running on port 8503
 ```bash
-docker-compose ps
-curl http://localhost:8503/health
+# Health check
+curl http://localhost:8503/health | jq
+
+# Statistics
+curl http://localhost:8503/stats | jq
+
+# Process file - Normal format (plain text)
+curl -X POST http://localhost:8503/process -F "file=@document.pdf" -F "format=normal"
+
+# Process file - Layout format (spatial reconstruction using bounding boxes)
+curl -X POST http://localhost:8503/process -F "file=@invoice.pdf" -F "format=layout"
+
+# Detailed analysis
+curl -X POST http://localhost:8503/analyze -F "file=@document.pdf" | jq -r '.ultra_analysis'
+
+# Original n8n endpoint (expects file in /home/n8n/in/)
+curl -X POST http://localhost:8503/ocr -F "filename=/home/n8n/in/document.pdf"
 ```
 
-### Issue: /process endpoint returns 500
-**Solution**: Check temp file permissions
-```bash
-docker exec -it <container> ls -la /home/n8n/in/
-```
+## Code Structure (app.py - ~2895 lines)
 
-### Issue: Statistics not updating
-**Solution**: Verify `server_stats` is global
-- Check line 1780 has `server_stats` dict
-- Check each endpoint uses `global server_stats`
-
-## Development Workflow
-
-1. **Never modify Paco's base** (lines 1-1773)
-2. **Add new endpoints** after line 2307
-3. **Update dashboard** HTML in `dashboard()` function
-4. **Test with curl** before committing
-5. **Update README.md** with new endpoints
-6. **Verify n8n compatibility** - original `/ocr` must work
-
-## Performance
-
-- **Dashboard**: < 100ms (cached stats)
-- **/health**: < 50ms (simple check)
-- **/stats**: < 100ms (JSON serialization)
-- **/process**: ~1-2s (includes Paco's full pipeline)
-- **/analyze**: ~1-2s (includes Paco's full pipeline)
-- **/ocr**: ~1-2s (Paco's original)
-
-## Code Style
-
-- Use `logger.info(f"[ENDPOINT] message")` for logging
-- Use `global server_stats` at start of endpoints
-- Clean temp files in `finally` blocks
-- Return processing_time in all responses
-- Use `try/except` for error handling
-
-## Important Variables
-
-### From Paco's Base (lines 1-1773)
+### Paco's Base (DO NOT MODIFY unless fixing critical bugs)
+- Lines 1-~1894: Core OCR processing
+- `OPENCV_CONFIG`, `ROTATION_CONFIG`, `OCR_CONFIG` - Configuration from ENV
 - `doc_preprocessor` - Orientation classification model
-- `ocr_instance` - PaddleOCR instance
-- `ocr_initialized` - Boolean flag
-- `OPENCV_CONFIG` - OpenCV parameters
-- `ROTATION_CONFIG` - Rotation parameters
+- `ocr_instance` - PaddleOCR instance (lazy loaded)
+- `init_docpreprocessor()`, `init_ocr()` - Model initialization
+- `proc_pdf_ocr()`, `create_spdf()` - PDF/image OCR processing
+- `/health`, `/ocr` endpoints
 
-### From API Layer (lines 1774-2312)
-- `server_stats` - Statistics dictionary
-  - `startup_time`
-  - `total_requests`
-  - `successful_requests`
-  - `failed_requests`
-  - `total_processing_time`
+### API REST Layer (Safe to modify)
+- Lines ~1895-2895: WebComunica API layer
+- `server_stats` - Request statistics tracking
+- `format_text_with_layout()` - Spatial text reconstruction using coordinates
+- `dashboard()` - Web UI with file upload
+- `/stats`, `/process`, `/analyze` endpoints
+- `/api/history`, `/api/history/clear` - OCR history management
 
-## Project Philosophy
+## Output Formats
 
-**This project is a THIN API LAYER over Paco's proven processing logic.**
+### Normal (default)
+Plain text extraction, lines joined with newlines.
 
-- ✅ Add endpoints that call `/ocr` internally
-- ✅ Add monitoring and statistics
-- ✅ Add dashboard and visualization
-- ❌ Don't duplicate preprocessing logic
-- ❌ Don't modify Paco's functions
-- ❌ Don't break n8n compatibility
+### Layout
+Spatial text reconstruction using bounding box coordinates from OCR. Attempts to preserve visual structure (columns, tables) similar to LLMWhisperer approach.
 
----
+**Known Issue:** Intermittent `std::exception` errors can cause Layout mode to fail. See `INVESTIGATION_NOTES.md` for debugging details. The error is related to the global `ocr_instance` potentially having concurrency issues.
 
-**Questions?** Read README.md or check Paco's original documentation.
+## Key Configuration (docker-compose.yml)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FLASK_PORT` | 8503 | Server port |
+| `OPENCV_HSV_LOWER_V` | 140 | Document detection threshold |
+| `OPENCV_INNER_SCALE_FACTOR` | 1.06 | Document crop scaling |
+| `ROTATION_MIN_CONFIDENCE` | 0.7 | Orientation confidence threshold |
+| `OCR_TEXT_DET_LIMIT_SIDE_LEN` | 960 | Max image dimension for detection |
+
+## Important Volumes
+
+| Path | Purpose |
+|------|---------|
+| `/home/n8n` | n8n integration (input/output files) |
+| `/home/n8n/.paddlex` | PaddleX model cache |
+| `/home/n8n/.paddleocr` | PaddleOCR model cache |
+| `/app/dictionaries` | OCR correction dictionaries (custom) |
+
+## OCR Dictionary System
+
+The dictionary system automatically corrects common OCR errors in Spanish documents.
+
+### Dictionary Files
+- **Base Dictionary**: 60+ corrections built into `app.py` for cities, fiscal terms, common concepts
+- **Custom Dictionary**: User-added corrections, persisted in `/app/dictionaries/custom_corrections.json`
+
+### Dictionary API Endpoints
+
+```bash
+# Get all dictionaries
+curl http://localhost:8503/api/dictionary | jq
+
+# Add a correction
+curl -X POST http://localhost:8503/api/dictionary/add \
+  -H "Content-Type: application/json" \
+  -d '{"wrong": "Cadlz", "correct": "Cádiz", "dictionary": "custom"}'
+
+# Remove a correction
+curl -X POST http://localhost:8503/api/dictionary/remove \
+  -H "Content-Type: application/json" \
+  -d '{"wrong": "Cadlz", "dictionary": "custom"}'
+
+# Test corrections on text
+curl -X POST http://localhost:8503/api/dictionary/test \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Factura de Cad1z con TOTA1: 55:23 EUR"}'
+
+# Analyze document for potential OCR errors
+curl -X POST http://localhost:8503/api/dictionary/analyze \
+  -F "file=@invoice.pdf"
+
+# Reload dictionaries from files
+curl -X POST http://localhost:8503/api/dictionary/reload
+```
+
+### Price Format Correction
+The dictionary system also corrects price formats automatically:
+- `55:23` → `55,23` (colon to comma in decimal numbers)
+
+## Adding New Endpoints
+
+Add after line ~2848 (before `start_model_loading()`). Pattern:
+
+```python
+@app.route('/your-endpoint', methods=['POST'])
+def your_endpoint():
+    global server_stats
+    start_time = time.time()
+    server_stats['total_requests'] += 1
+    temp_file_path = None
+
+    try:
+        # 1. Validate and save file to /home/n8n/in/
+        # 2. Call ocr() internally via test_request_context
+        # 3. Cleanup temp files
+        # 4. Return formatted response with processing_time
+    except Exception as e:
+        server_stats['failed_requests'] += 1
+        # Cleanup and return error
+```
+
+## CPU Requirements
+
+Requires CPU with **AVX/AVX2** support. Will fail with `Illegal instruction (core dumped)` on:
+- Basic KVM virtualized VPS
+- Old CPUs without AVX instructions
+
+## Development Notes
+
+- Lazy loading: Models load in background thread after server starts
+- First OCR request may take ~2 minutes (model download + initialization)
+- Subsequent requests: 1-2 seconds
+- All new endpoints should call `/ocr` internally to avoid duplicating processing logic
+- Original `/ocr` endpoint must remain unchanged for n8n compatibility

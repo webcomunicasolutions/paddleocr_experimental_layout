@@ -189,6 +189,7 @@ OCR_CONFIG = {
 doc_preprocessor = None
 ocr_instance = None
 ocr_initialized = False
+ocr_consecutive_errors = 0  # Contador de errores consecutivos para auto-reinicialización
 
 
 def init_docpreprocessor():
@@ -227,12 +228,23 @@ def init_docpreprocessor():
         return False
 
 
-def init_ocr():
-    """Inicializar PaddleOCR con configuracion optimizada desde ENV"""
-    global ocr_instance, ocr_initialized
+def init_ocr(force=False):
+    """Inicializar PaddleOCR con configuracion optimizada desde ENV
 
-    if ocr_initialized:
+    Args:
+        force: Si es True, reinicializa aunque ya esté inicializado (para recuperación de errores)
+    """
+    global ocr_instance, ocr_initialized, ocr_consecutive_errors
+
+    if ocr_initialized and not force:
         return True
+
+    # Si es forzado, limpiar estado previo
+    if force:
+        logger.warning("[OCR REINIT] Forzando reinicialización del OCR por errores consecutivos...")
+        ocr_instance = None
+        ocr_initialized = False
+        ocr_consecutive_errors = 0
 
     try:
         logger.info("[OCR INIT] ==========================================================================================")
@@ -727,6 +739,107 @@ def fix_orientation(img_path, doc_preprocessor):
     except Exception as e:
         logger.warning(f"[IMG] [PADDLE] [ORIENTATION] Error detectando orientacion: {e}")
         return False, 0, 0.0, False
+
+
+def enhance_image_for_ocr(img_path, enhance_level='auto'):
+    """
+    Mejora la calidad de imagen para OCR en documentos escaneados/fotos de baja calidad.
+
+    Args:
+        img_path: Ruta a la imagen
+        enhance_level: 'auto', 'light', 'medium', 'strong' o 'none'
+
+    Returns:
+        (success, enhanced, details)
+    """
+    try:
+        img = cv2.imread(img_path)
+        if img is None:
+            return False, False, "No se pudo leer la imagen"
+
+        original_img = img.copy()
+
+        # Convertir a escala de grises para análisis
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Analizar la calidad de la imagen
+        # - Contraste: desviación estándar de los valores de gris
+        # - Brillo: media de los valores de gris
+        contrast = gray.std()
+        brightness = gray.mean()
+
+        logger.info(f"[ENHANCE] Análisis de imagen: contraste={contrast:.1f}, brillo={brightness:.1f}")
+
+        # Determinar nivel de mejora automáticamente
+        # Nota: La binarización agresiva puede empeorar resultados en algunos casos
+        # Mejor ser conservador y usar 'medium' como máximo para auto
+        if enhance_level == 'auto':
+            if contrast < 30:  # Muy bajo contraste (imagen muy lavada)
+                enhance_level = 'medium'  # No usar strong automáticamente
+            elif contrast < 50:  # Bajo contraste
+                enhance_level = 'medium'
+            elif contrast < 70:  # Contraste moderado
+                enhance_level = 'light'
+            else:
+                enhance_level = 'none'
+            logger.info(f"[ENHANCE] Nivel auto-detectado: {enhance_level}")
+
+        if enhance_level == 'none':
+            return True, False, "Imagen con buena calidad, no requiere mejora"
+
+        # Aplicar mejoras según el nivel
+        enhanced = gray.copy()
+
+        # 1. Eliminación de ruido (siempre útil)
+        if enhance_level in ['light', 'medium', 'strong']:
+            enhanced = cv2.fastNlMeansDenoising(enhanced, None, h=10, templateWindowSize=7, searchWindowSize=21)
+            logger.debug("[ENHANCE] Aplicado: eliminación de ruido")
+
+        # 2. Mejora de contraste con CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        if enhance_level in ['medium', 'strong']:
+            clip_limit = 2.0 if enhance_level == 'medium' else 3.0
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+            enhanced = clahe.apply(enhanced)
+            logger.debug(f"[ENHANCE] Aplicado: CLAHE (clipLimit={clip_limit})")
+
+        # 3. Binarización adaptativa para texto muy difuso
+        if enhance_level == 'strong':
+            # Usamos binarización adaptativa que funciona mejor con iluminación desigual
+            enhanced = cv2.adaptiveThreshold(
+                enhanced, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                blockSize=11,  # Tamaño del bloque para calcular umbral local
+                C=2  # Constante a restar del umbral calculado
+            )
+            logger.debug("[ENHANCE] Aplicado: binarización adaptativa")
+
+        # 4. Sharpening (enfoque) para texto borroso
+        if enhance_level in ['medium', 'strong']:
+            # Kernel de enfoque
+            kernel = np.array([[-1, -1, -1],
+                              [-1,  9, -1],
+                              [-1, -1, -1]])
+            # Solo aplicar enfoque si no está binarizado
+            if enhance_level != 'strong':
+                enhanced = cv2.filter2D(enhanced, -1, kernel)
+                logger.debug("[ENHANCE] Aplicado: enfoque (sharpening)")
+
+        # Convertir de vuelta a BGR para guardar
+        enhanced_bgr = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+        # Guardar imagen mejorada (sobrescribe la original)
+        cv2.imwrite(img_path, enhanced_bgr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
+        # Analizar mejora
+        new_contrast = enhanced.std()
+        logger.info(f"[ENHANCE] Imagen mejorada: contraste {contrast:.1f} -> {new_contrast:.1f}")
+
+        return True, True, f"Mejora aplicada: {enhance_level} (contraste: {contrast:.1f} -> {new_contrast:.1f})"
+
+    except Exception as e:
+        logger.error(f"[ENHANCE] Error mejorando imagen: {e}")
+        return False, False, str(e)
 
 
 def fix_deskew(img_path):
@@ -1234,6 +1347,9 @@ def create_spdf(n8nHomeDir, base_name, in_pdf, spdf, page_num, ocr_dpi=288):
             action = " - CORREGIDO" if corrected else ""
             logger.info(f"[DESKEW] Pagina {page_num}: {angle:.2f} grados{action}")
 
+        # Mejora de imagen desactivada por defecto (añade tiempo sin mejora consistente)
+        # Se puede activar manualmente con enhance_image_for_ocr(out_png, 'medium')
+
     else:
         # Extraer imagenes a PNG temporal
         out_png = f"{n8nHomeDir}/ocr/{base_name}_2.4.page-{page_num}.png"
@@ -1243,7 +1359,8 @@ def create_spdf(n8nHomeDir, base_name, in_pdf, spdf, page_num, ocr_dpi=288):
     logger.info(f"[OCR] Ejecutando OCR en pagina {page_num}...")
     ocr_start = time.time()
 
-    # Reintentos para OCR
+    # Reintentos para OCR con auto-reinicialización tras errores consecutivos
+    global ocr_consecutive_errors
     page_ocr_result = None
     max_attempts = 5
     for attempt in range(1, max_attempts + 1):
@@ -1257,13 +1374,26 @@ def create_spdf(n8nHomeDir, base_name, in_pdf, spdf, page_num, ocr_dpi=288):
                 logger.info(f"[OCR] Pagina {page_num}: {len(texts)} bloques detectados")
                 logger.info(f"[OCR] Confianza promedio: {avg_conf:.3f}")
                 logger.info(f"[OCR] Tiempo OCR: {ocr_time:.2f}s")
+                # Éxito: resetear contador de errores consecutivos
+                ocr_consecutive_errors = 0
             else:
                 logger.warning(f"[OCR] Pagina {page_num}: Sin texto detectado")
                 page_ocr_result = None
             break  # Exito, salir del bucle de reintentos
 
         except Exception as e:
+            ocr_consecutive_errors += 1
             logger.error(f"[OCR] Error en pagina {page_num} (intento {attempt}): {e}")
+            logger.error(f"[OCR] Errores consecutivos acumulados: {ocr_consecutive_errors}")
+
+            # Si hay muchos errores consecutivos, forzar reinicialización del OCR
+            if ocr_consecutive_errors >= 3 and attempt < max_attempts:
+                logger.warning(f"[OCR] {ocr_consecutive_errors} errores consecutivos detectados - reinicializando OCR...")
+                if init_ocr(force=True):
+                    logger.info("[OCR] OCR reinicializado correctamente, reintentando...")
+                else:
+                    logger.error("[OCR] Fallo en reinicialización del OCR")
+
             if attempt < max_attempts:
                 logger.info(f"[OCR] Esperando 1 segundo antes del siguiente intento...")
                 time.sleep(1)
@@ -1407,10 +1537,16 @@ def proc_pdf_ocr(n8nHomeDir, base_name, ext):
         # Leer texto consolidado de todas las paginas (opcional)
         # Esto es para compatibilidad con el sistema anterior
         try:
-            # Extraer texto del PDF final para estadisticas
-            result_text = subprocess.run(['pdftotext', final_pdf, '-'], capture_output=True, text=True)
-            extracted_text = result_text.stdout if result_text.returncode == 0 else ""
-            text_length = len(extracted_text.strip())
+            # Extraer texto del PDF final - dos versiones:
+            # 1. Sin layout (rápido, texto plano)
+            result_plain = subprocess.run(['pdftotext', final_pdf, '-'], capture_output=True, text=True)
+            extracted_text_plain = result_plain.stdout if result_plain.returncode == 0 else ""
+
+            # 2. Con layout (mantiene estructura espacial)
+            result_layout = subprocess.run(['pdftotext', '-layout', final_pdf, '-'], capture_output=True, text=True)
+            extracted_text_layout = result_layout.stdout if result_layout.returncode == 0 else ""
+
+            text_length = len(extracted_text_plain.strip())
 
             logger.info("[PROC_PDF_OCR] ==========================================================================================")
             logger.info(f"[PROC_PDF_OCR] Proceso completado exitosamente")
@@ -1421,10 +1557,12 @@ def proc_pdf_ocr(n8nHomeDir, base_name, ext):
             logger.info("[PROC_PDF_OCR] ==========================================================================================")
 
             return True, "Success", {
-                'text_lines': extracted_text.splitlines() if extracted_text else [],
+                'text_lines': extracted_text_plain.splitlines() if extracted_text_plain else [],
+                'extracted_text_plain': extracted_text_plain,    # Texto sin layout (rápido)
+                'extracted_text_layout': extracted_text_layout,  # Texto con layout (espacial)
                 'confidences': all_confidences,
-                'coordinates': all_coordinates,  # NUEVO: coordenadas para modo Layout
-                'ocr_blocks': all_text_lines,    # NUEVO: textos originales del OCR
+                'coordinates': all_coordinates,  # Coordenadas para modo Layout
+                'ocr_blocks': all_text_lines,    # Textos originales del OCR
                 'total_blocks': len(all_text_lines),
                 'pages': pages,
                 'processing_time': total_time
@@ -1856,16 +1994,19 @@ def ocr():
         # Extraer datos del OCR
         text_lines = ocr_data.get('text_lines', [])
         confidences = ocr_data.get('confidences', [])
-        coordinates = ocr_data.get('coordinates', [])  # NUEVO: coordenadas
-        ocr_blocks = ocr_data.get('ocr_blocks', [])    # NUEVO: bloques OCR originales
+        coordinates = ocr_data.get('coordinates', [])  # Coordenadas
+        ocr_blocks = ocr_data.get('ocr_blocks', [])    # Bloques OCR originales
         total_blocks = ocr_data.get('total_blocks', 0)
         pages = ocr_data.get('pages', 1)
+        # Textos extraídos con/sin layout
+        extracted_text_plain = ocr_data.get('extracted_text_plain', '')
+        extracted_text_layout = ocr_data.get('extracted_text_layout', '')
 
         # Calcular estadisticas
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
 
-        # Unir texto extraido
-        full_text = '\n'.join(text_lines)
+        # Usar texto plano como default (compatible con versiones anteriores)
+        full_text = extracted_text_plain if extracted_text_plain else '\n'.join(text_lines)
 
         logger.info("[OCR] ==========================================================================================")
         logger.info(f"[OCR STATS] Documento procesado correctamente - Paginas: {pages} - Tiempo {duration:.2f}s")
@@ -1875,9 +2016,11 @@ def ocr():
             'success': True,
             'in_file': filename,
             'pdf_file': f"{base_name}.pdf",
-            'extracted_text': full_text,
-            'ocr_blocks': ocr_blocks,      # NUEVO: bloques OCR para modo Layout
-            'coordinates': coordinates,     # NUEVO: coordenadas para modo Layout
+            'extracted_text': full_text,              # Texto plano (compatible)
+            'extracted_text_plain': extracted_text_plain,   # Sin layout (rápido)
+            'extracted_text_layout': extracted_text_layout, # Con layout (espacial)
+            'ocr_blocks': ocr_blocks,      # Bloques OCR para modo Layout
+            'coordinates': coordinates,     # Coordenadas para modo Layout
             'stats': {
                 'total_pages': pages,
                 'total_blocks': total_blocks,
@@ -1909,6 +2052,345 @@ server_stats = {
 # Historial de OCR para testing (últimos 50 resultados)
 ocr_history = []
 MAX_HISTORY = 50
+
+# ============================================================================
+# SISTEMA DE DICCIONARIOS OCR (PERSISTENTE)
+# ============================================================================
+# - Diccionario BASE: Términos fiscales españoles, ciudades, errores comunes
+# - Diccionario PERSONALIZADO: Errores detectados por el usuario
+# - Patrones REGEX: Correcciones de formato (precios, fechas, etc.)
+# ============================================================================
+
+import re
+
+# Ruta para los diccionarios persistentes
+DICTIONARY_BASE_PATH = '/app/dictionaries'
+DICTIONARY_BASE_FILE = f'{DICTIONARY_BASE_PATH}/base_corrections.json'
+DICTIONARY_CUSTOM_FILE = f'{DICTIONARY_BASE_PATH}/custom_corrections.json'
+DICTIONARY_REGEX_FILE = f'{DICTIONARY_BASE_PATH}/regex_patterns.json'
+
+# Diccionario BASE (integrado - se usa si no existe el archivo JSON)
+OCR_CORRECTIONS_BASE = {
+    # ============================================================================
+    # DICCIONARIO DE CORRECCIONES OCR - ESPAÑOL
+    # Basado en confusiones comunes de caracteres OCR:
+    # - 1 <-> l <-> I <-> |  (uno, ele minúscula, i mayúscula, barra)
+    # - 0 <-> O <-> o        (cero, o mayúscula, o minúscula)
+    # - rn <-> m             (erre-ene vs eme)
+    # - c <-> e              (ce vs e)
+    # - 5 <-> S              (cinco vs ese)
+    # - 8 <-> B              (ocho vs be)
+    # - F <-> E <-> P        (mayúsculas similares)
+    # ============================================================================
+
+    # === CIUDADES ESPAÑOLAS (con tildes) ===
+    'Cag1z': 'Cádiz', 'Cadlz': 'Cádiz', 'Cad1z': 'Cádiz', 'Gad1z': 'Cádiz',
+    'Gad17': 'Cádiz', 'CAD1Z': 'CÁDIZ', 'CADLZ': 'CÁDIZ', 'Cadiz': 'Cádiz',
+    'Cádlz': 'Cádiz', 'CÁD1Z': 'CÁDIZ', 'CADIZ': 'CÁDIZ',
+    'MALAGA': 'MÁLAGA', 'Malaga': 'Málaga', 'MA1AGA': 'MÁLAGA', 'MÄLAGA': 'MÁLAGA',
+    'CORDOBA': 'CÓRDOBA', 'Cordoba': 'Córdoba', 'CORDOEA': 'CÓRDOBA', 'C0RDOBA': 'CÓRDOBA',
+    'TEREZ': 'JEREZ', 'JERÉZ': 'JEREZ', 'Jeréz': 'Jerez', 'JEREX': 'JEREZ', '1EREZ': 'JEREZ',
+    'SEVLLLA': 'SEVILLA', 'SEV1LLA': 'SEVILLA', 'SEVI11A': 'SEVILLA', 'SEVlLLA': 'SEVILLA',
+    'ALMERIA': 'ALMERÍA', 'A1MERIA': 'ALMERÍA', 'ALMER1A': 'ALMERÍA', 'ALMERlA': 'ALMERÍA',
+    'JAEN': 'JAÉN', '1AEN': 'JAÉN', 'JAÉN': 'JAÉN',
+    'HUELVA': 'HUELVA', 'HUE1VA': 'HUELVA', 'HUÉLVA': 'HUELVA',
+    'GRANADA': 'GRANADA', '6RANADA': 'GRANADA', 'GRANAD4': 'GRANADA',
+    'MADRID': 'MADRID', 'MADR1D': 'MADRID', 'MADRIO': 'MADRID',
+    'BARCELONA': 'BARCELONA', 'BARCEL0NA': 'BARCELONA', '8ARCELONA': 'BARCELONA',
+    'VALENCIA': 'VALENCIA', 'VA1ENCIA': 'VALENCIA', 'VALENC1A': 'VALENCIA',
+    'BILBAO': 'BILBAO', 'B1LBAO': 'BILBAO', 'BILBA0': 'BILBAO',
+    'ZARAGOZA': 'ZARAGOZA', 'ZARAG0ZA': 'ZARAGOZA', '2ARAGOZA': 'ZARAGOZA',
+
+    # === TÉRMINOS FISCALES ===
+    'XIUA': '%IVA', 'X1VA': '%IVA', 'XTVA': '%IVA', 'ZTUA': '%IVA', '%1VA': '%IVA',
+    '1VA': 'IVA', '|VA': 'IVA', 'lVA': 'IVA', 'IVA': 'IVA', '1V4': 'IVA', 'IV4': 'IVA',
+    'N.1.F': 'N.I.F', 'N1F': 'NIF', 'N.l.F': 'N.I.F', 'N1F:': 'NIF:', 'NlF': 'NIF',
+    'N.1.F.': 'N.I.F.', 'N.l.F.': 'N.I.F.', 'N|F': 'NIF', 'NIF': 'NIF',
+    'C.1.F': 'C.I.F', 'C1F': 'CIF', 'C.l.F': 'C.I.F', 'ClF': 'CIF', 'C|F': 'CIF',
+    'C.1.F.': 'C.I.F.', 'C.l.F.': 'C.I.F.', 'CIF': 'CIF',
+    'lRPF': 'IRPF', '1RPF': 'IRPF', 'IRPE': 'IRPF', '1RPE': 'IRPF',
+    'lotal': 'Total', 'Tota1': 'Total', 'TOTA1': 'TOTAL', '7otal': 'Total',
+    'T0TAL': 'TOTAL', 'T0tal': 'Total', 'Tota|': 'Total', 'TÓTAL': 'TOTAL',
+    'TotalcFactura': 'Total Factura', 'Tota1 Factura': 'Total Factura',
+    'Tota1Factura': 'Total Factura', 'TOTA1 FACTURA': 'TOTAL FACTURA',
+    'Frecio': 'Precio', 'Prec1o': 'Precio', 'Frec1o': 'Precio', 'FREC1O': 'PRECIO',
+    'Prec|o': 'Precio', 'PREC1O': 'PRECIO', 'PR3CIO': 'PRECIO', 'PRECI0': 'PRECIO',
+    'Inponible': 'Imponible', 'Inconible': 'Imponible', '1mponible': 'Imponible',
+    'lmponible': 'Imponible', 'Irnponible': 'Imponible', '|mponible': 'Imponible',
+    'Pase Imponible': 'Base Imponible', 'Pase Inponible': 'Base Imponible',
+    'Rase Imponible': 'Base Imponible', 'Rase Inponible': 'Base Imponible',
+    'Rase Inconible': 'Base Imponible', 'BASE 1MPONIBLE': 'BASE IMPONIBLE',
+    'BASE lMPONIBLE': 'BASE IMPONIBLE', '8ASE IMPONIBLE': 'BASE IMPONIBLE',
+    'Inporte': 'Importe', 'Imeorte': 'Importe', 'lmporte': 'Importe', '1mporte': 'Importe',
+    'Irnporte': 'Importe', '|mporte': 'Importe', 'IMFORTE': 'IMPORTE', '1MPORTE': 'IMPORTE',
+    'Subtota1': 'Subtotal', 'SUBTOTA1': 'SUBTOTAL', 'SU8TOTAL': 'SUBTOTAL',
+    'Sub7otal': 'Subtotal', 'SUBTOTAI': 'SUBTOTAL', 'SUBTOTA|': 'SUBTOTAL',
+    'Descuento': 'Descuento', 'Oescuento': 'Descuento', 'Oescuerito': 'Descuento',
+    'DESCUENT0': 'DESCUENTO', 'D3SCUENTO': 'DESCUENTO', 'OESCUENTO': 'DESCUENTO',
+    'Cuota': 'Cuota', 'Cu0ta': 'Cuota', 'CUOTA': 'CUOTA', 'CU0TA': 'CUOTA',
+    'Exento': 'Exento', 'Exent0': 'Exento', '3xento': 'Exento',
+
+    # === CONCEPTOS COMUNES FACTURAS/TICKETS ===
+    'GASOLEO': 'GASÓLEO', 'GASOLEOA': 'GASÓLEO A', 'GASOLED': 'GASÓLEO',
+    'GAS0LEO': 'GASÓLEO', '6ASOLEO': 'GASÓLEO', 'GASOLE0': 'GASÓLEO',
+    'GASOLINA': 'GASOLINA', 'GASOL1NA': 'GASOLINA', 'GAS0LINA': 'GASOLINA',
+    '6ASOLINA': 'GASOLINA', 'GASO1INA': 'GASOLINA', 'GASOLlNA': 'GASOLINA',
+    'DIESEL': 'DIÉSEL', 'D1ESEL': 'DIÉSEL', 'DIESE1': 'DIÉSEL', 'DlESEL': 'DIÉSEL',
+    'Factura': 'Factura', 'EACTURA': 'FACTURA', 'Eactura': 'Factura',
+    'FACTURA': 'FACTURA', 'F4CTURA': 'FACTURA', 'EACTÜRA': 'FACTURA',
+    'Recibo': 'Recibo', 'Rec1bo': 'Recibo', 'RECI8O': 'RECIBO', 'REClBO': 'RECIBO',
+    'Ticket': 'Ticket', 'T1cket': 'Ticket', 'Tlcket': 'Ticket', 'TICKET': 'TICKET',
+    'Albaran': 'Albarán', 'Albarán': 'Albarán', 'A1baran': 'Albarán', 'ALBARAN': 'ALBARÁN',
+    'ELECTR1CIDAD': 'ELECTRICIDAD', 'E1ectricidad': 'Electricidad',
+    'ELECTRIC1DAD': 'ELECTRICIDAD', '3LECTRICIDAD': 'ELECTRICIDAD', 'ELECTRlCIDAD': 'ELECTRICIDAD',
+    'Serv1cio': 'Servicio', 'SERV1CIO': 'SERVICIO', 'SERVlCIO': 'SERVICIO',
+    'Servlcio': 'Servicio', '5ERVICIO': 'SERVICIO',
+    'Articulo': 'Artículo', 'Art1culo': 'Artículo', 'ARTICUL0': 'ARTÍCULO',
+    'Producto': 'Producto', 'Pr0ducto': 'Producto', 'PR0DUCTO': 'PRODUCTO',
+    'Concepto': 'Concepto', 'C0ncepto': 'Concepto', 'Concep7o': 'Concepto',
+    'Descripcion': 'Descripción', 'Descr1pcion': 'Descripción', 'Descripc1on': 'Descripción',
+
+    # === UNIDADES DE MEDIDA ===
+    '1itros': 'litros', 'L1TROS': 'LITROS', '1itro': 'litro', 'llTROS': 'LITROS',
+    'litros': 'litros', 'LlTROS': 'LITROS', '1ITROS': 'LITROS', 'L1TR0S': 'LITROS',
+    'Un1dades': 'Unidades', 'UN1DADES': 'UNIDADES', 'Unldades': 'Unidades',
+    'UNIDADE5': 'UNIDADES', 'UN1DADE5': 'UNIDADES',
+    'Cant1dad': 'Cantidad', 'CANT1DAD': 'CANTIDAD', 'Cantldad': 'Cantidad',
+    'CANTID4D': 'CANTIDAD', 'CÄNTIDAD': 'CANTIDAD',
+    'Kilo': 'Kilo', 'K1lo': 'Kilo', 'Ki1o': 'Kilo', 'Kl1o': 'Kilo',
+    'Kilos': 'Kilos', 'K1los': 'Kilos', 'Ki1os': 'Kilos',
+    'Gramos': 'Gramos', '6ramos': 'Gramos', 'Grarn0s': 'Gramos',
+
+    # === FECHAS Y TIEMPO ===
+    'Fecha': 'Fecha', 'EECHA': 'FECHA', 'Eecha': 'Fecha', 'F3CHA': 'FECHA',
+    'FECH4': 'FECHA', 'E3CHA': 'FECHA', 'Fecba': 'Fecha',
+    'Venc1miento': 'Vencimiento', 'VENC1MIENTO': 'VENCIMIENTO', 'Venclmiento': 'Vencimiento',
+    'Vencirniento': 'Vencimiento', 'VENCIM1ENTO': 'VENCIMIENTO',
+    'Em1sión': 'Emisión', 'EM1SIÓN': 'EMISIÓN', 'Emlsión': 'Emisión',
+    'Emlsion': 'Emisión', 'Ernisión': 'Emisión',
+    'Caducidad': 'Caducidad', 'Caduc1dad': 'Caducidad', 'CADUCIDAD': 'CADUCIDAD',
+
+    # === DATOS DE EMPRESA/CLIENTE ===
+    'NoFactura': 'Nº Factura', 'N°Factura': 'Nº Factura', 'N.Factura': 'Nº Factura',
+    'No.Factura': 'Nº Factura', 'NºFactura': 'Nº Factura', 'N° Factura': 'Nº Factura',
+    'clte.': 'cliente', 'Clte.': 'Cliente', 'C1te.': 'Cliente', 'Clte': 'Cliente',
+    'Cliente': 'Cliente', 'Cl1ente': 'Cliente', 'C1iente': 'Cliente', 'CL1ENTE': 'CLIENTE',
+    'Direccion': 'Dirección', 'Dlrección': 'Dirección', 'D1rección': 'Dirección',
+    'DIRECC1ON': 'DIRECCIÓN', 'DIRECCION': 'DIRECCIÓN',
+    'Telefono': 'Teléfono', 'Te1éfono': 'Teléfono', 'Teléfon0': 'Teléfono',
+    'TELEF0NO': 'TELÉFONO', 'TEL3FONO': 'TELÉFONO',
+    'Domicilio': 'Domicilio', 'Dom1cilio': 'Domicilio', 'Domlcilio': 'Domicilio',
+    'donicilio': 'domicilio', 'DONICILIO': 'DOMICILIO', 'DONIC1LIO': 'DOMICILIO',
+    'Correo': 'Correo', 'C0rreo': 'Correo', 'Corre0': 'Correo',
+    'Email': 'Email', 'Emai1': 'Email', 'Ema1l': 'Email', '3mail': 'Email',
+    'adninistracion': 'administración', 'adrninistración': 'administración',
+    'adm1nistracion': 'administración', 'ADMINISTRACION': 'ADMINISTRACIÓN',
+
+    # === CÓDIGOS POSTALES Y CALLES ===
+    'C401Z': 'CÁDIZ', '0401Z': 'CÁDIZ', 'CAD1Z': 'CÁDIZ',
+    '11405C401Z': '11405 CÁDIZ', '11510C401Z': '11510 CÁDIZ',
+    'tra.': 'Ctra.', 'ctra.': 'Ctra.', 'Ctra': 'Ctra.', 'CTRA': 'CTRA.',
+    'Carretera': 'Carretera', 'Carr3tera': 'Carretera', 'Carret3ra': 'Carretera',
+    'Avda': 'Avda.', 'AVDA': 'AVDA.', 'Avenida': 'Avenida', 'Aven1da': 'Avenida',
+    'Calle': 'Calle', 'Ca1le': 'Calle', 'Cal1e': 'Calle', 'CALLE': 'CALLE',
+    'Plaza': 'Plaza', 'P1aza': 'Plaza', 'Plaz4': 'Plaza', 'PLAZA': 'PLAZA',
+
+    # === ESTACIONES DE SERVICIO ===
+    'ESERVICtOS': 'E.S. SERVICIOS', 'ESERVIC1OS': 'E.S. SERVICIOS',
+    'E.S.': 'E.S.', 'ES.': 'E.S.', 'E5.': 'E.S.', 'E.5.': 'E.S.',
+    'ESTAC1ON': 'ESTACIÓN', 'ESTACION': 'ESTACIÓN', 'ESTAC10N': 'ESTACIÓN',
+    'Estación': 'Estación', 'Estac1ón': 'Estación', 'Estacion': 'Estación',
+    'Surtidor': 'Surtidor', 'Surt1dor': 'Surtidor', 'SURTID0R': 'SURTIDOR',
+    'Manguera': 'Manguera', 'Mangue|ra': 'Manguera', 'M4nguera': 'Manguera',
+    'Olivag.': 'Olivos',
+
+    # === FORMAS DE PAGO ===
+    'Efectivo': 'Efectivo', 'Efect1vo': 'Efectivo', '3fectivo': 'Efectivo',
+    'EFECTIV0': 'EFECTIVO', 'EFECTIVO': 'EFECTIVO',
+    'Tarjeta': 'Tarjeta', 'Tarj3ta': 'Tarjeta', 'Tarje7a': 'Tarjeta', 'TARJ3TA': 'TARJETA',
+    'Credito': 'Crédito', 'Créd1to': 'Crédito', 'Crédlto': 'Crédito',
+    'Debito': 'Débito', 'Déb1to': 'Débito', 'Déblto': 'Débito',
+    'Transferencia': 'Transferencia', 'Transfer3ncia': 'Transferencia',
+    'Pago': 'Pago', 'Pag0': 'Pago', 'PAG0': 'PAGO',
+    'Cambio': 'Cambio', 'Camb1o': 'Cambio', 'Carnbio': 'Cambio',
+    'Entregado': 'Entregado', 'Entregad0': 'Entregado', '3ntregado': 'Entregado',
+
+    # === NÚMEROS CONFUNDIDOS CON LETRAS ===
+    'l0': '10', '1O': '10', 'lO': '10',
+    '2O': '20', '2o': '20',
+    '3O': '30', '3o': '30',
+    '4O': '40', '4o': '40',
+    '5O': '50', '5o': '50',
+
+    # === SÍMBOLOS Y PUNTUACIÓN ===
+    'EUR': 'EUR', '3UR': 'EUR', 'EÜR': 'EUR',
+    'EUROS': 'EUROS', '3UROS': 'EUROS', 'EUR0S': 'EUROS',
+
+    # === PALABRAS COMUNES CON ERRORES FRECUENTES ===
+    'rnismo': 'mismo', 'misrno': 'mismo', 'm1smo': 'mismo',
+    'rnás': 'más', 'mas': 'más', 'rnenos': 'menos', 'men0s': 'menos',
+    'corno': 'como', 'corn0': 'como', 'c0mo': 'como',
+    'rnuy': 'muy', 'mny': 'muy',
+    'sólo': 'sólo', 'so1o': 'sólo', 's0lo': 'sólo',
+    'número': 'número', 'númer0': 'número', 'núrnero': 'número', 'nurnero': 'número',
+    'según': 'según', 'segün': 'según', '5egún': 'según',
+    'también': 'también', 'tamb1én': 'también', 'tarnbién': 'también',
+    'información': 'información', 'informac1ón': 'información', 'inforrnación': 'información',
+}
+
+# Diccionario PERSONALIZADO (se carga desde archivo)
+OCR_CORRECTIONS_CUSTOM = {}
+
+# Diccionario combinado (se actualiza al cargar)
+OCR_CORRECTIONS = {}
+
+# Patrones regex para correcciones de formato
+OCR_REGEX_CORRECTIONS = [
+    # Comas en precios: 55:23 -> 55,23 (dos dígitos después de :)
+    (re.compile(r'(\d+):(\d{2})(?!\d)'), r'\1,\2'),
+    # Comas en precios con 3 dígitos: 1:009 -> 1,009
+    (re.compile(r'(\d+):(\d{3})(?!\d)'), r'\1,\2'),
+    # Puntos como separador decimal en contexto de precio: 11.60 -> 11,60 (solo si parece precio)
+    # No aplicar porque el punto es correcto en muchos contextos
+    # Espacios extras
+    (re.compile(r'\s{3,}'), '  '),
+]
+
+
+def load_dictionaries():
+    """
+    Carga los diccionarios desde archivos JSON.
+    Si no existen, crea los archivos con los valores por defecto.
+    """
+    global OCR_CORRECTIONS, OCR_CORRECTIONS_CUSTOM, OCR_CORRECTIONS_BASE
+
+    try:
+        os.makedirs(DICTIONARY_BASE_PATH, exist_ok=True)
+
+        # Cargar diccionario base
+        if os.path.exists(DICTIONARY_BASE_FILE):
+            with open(DICTIONARY_BASE_FILE, 'r', encoding='utf-8') as f:
+                loaded_base = json.load(f)
+                OCR_CORRECTIONS_BASE.update(loaded_base)
+                logger.info(f"[DICTIONARY] Cargado diccionario base: {len(loaded_base)} entradas")
+        else:
+            # Guardar diccionario base por defecto
+            with open(DICTIONARY_BASE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(OCR_CORRECTIONS_BASE, f, ensure_ascii=False, indent=2)
+            logger.info(f"[DICTIONARY] Creado diccionario base con {len(OCR_CORRECTIONS_BASE)} entradas")
+
+        # Cargar diccionario personalizado
+        if os.path.exists(DICTIONARY_CUSTOM_FILE):
+            with open(DICTIONARY_CUSTOM_FILE, 'r', encoding='utf-8') as f:
+                OCR_CORRECTIONS_CUSTOM = json.load(f)
+                logger.info(f"[DICTIONARY] Cargado diccionario personalizado: {len(OCR_CORRECTIONS_CUSTOM)} entradas")
+        else:
+            OCR_CORRECTIONS_CUSTOM = {}
+            with open(DICTIONARY_CUSTOM_FILE, 'w', encoding='utf-8') as f:
+                json.dump(OCR_CORRECTIONS_CUSTOM, f, ensure_ascii=False, indent=2)
+            logger.info(f"[DICTIONARY] Creado diccionario personalizado vacío")
+
+        # Combinar diccionarios (personalizado tiene prioridad)
+        OCR_CORRECTIONS = {**OCR_CORRECTIONS_BASE, **OCR_CORRECTIONS_CUSTOM}
+        logger.info(f"[DICTIONARY] Total de correcciones activas: {len(OCR_CORRECTIONS)}")
+
+    except Exception as e:
+        logger.error(f"[DICTIONARY] Error cargando diccionarios: {e}")
+        # Usar diccionario en memoria como fallback
+        OCR_CORRECTIONS = OCR_CORRECTIONS_BASE.copy()
+
+
+def save_custom_dictionary():
+    """Guarda el diccionario personalizado a archivo JSON"""
+    global OCR_CORRECTIONS, OCR_CORRECTIONS_CUSTOM
+    try:
+        os.makedirs(DICTIONARY_BASE_PATH, exist_ok=True)
+        with open(DICTIONARY_CUSTOM_FILE, 'w', encoding='utf-8') as f:
+            json.dump(OCR_CORRECTIONS_CUSTOM, f, ensure_ascii=False, indent=2)
+        # Actualizar diccionario combinado
+        OCR_CORRECTIONS = {**OCR_CORRECTIONS_BASE, **OCR_CORRECTIONS_CUSTOM}
+        logger.info(f"[DICTIONARY] Guardado diccionario personalizado: {len(OCR_CORRECTIONS_CUSTOM)} entradas")
+        return True
+    except Exception as e:
+        logger.error(f"[DICTIONARY] Error guardando diccionario: {e}")
+        return False
+
+
+def add_correction(wrong, correct, dictionary='custom'):
+    """Añade una corrección al diccionario"""
+    global OCR_CORRECTIONS_CUSTOM, OCR_CORRECTIONS_BASE
+    if dictionary == 'custom':
+        OCR_CORRECTIONS_CUSTOM[wrong] = correct
+        return save_custom_dictionary()
+    elif dictionary == 'base':
+        OCR_CORRECTIONS_BASE[wrong] = correct
+        try:
+            with open(DICTIONARY_BASE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(OCR_CORRECTIONS_BASE, f, ensure_ascii=False, indent=2)
+            load_dictionaries()
+            return True
+        except Exception as e:
+            logger.error(f"[DICTIONARY] Error guardando diccionario base: {e}")
+            return False
+    return False
+
+
+def remove_correction(wrong, dictionary='custom'):
+    """Elimina una corrección del diccionario"""
+    global OCR_CORRECTIONS_CUSTOM, OCR_CORRECTIONS_BASE
+    if dictionary == 'custom' and wrong in OCR_CORRECTIONS_CUSTOM:
+        del OCR_CORRECTIONS_CUSTOM[wrong]
+        return save_custom_dictionary()
+    elif dictionary == 'base' and wrong in OCR_CORRECTIONS_BASE:
+        del OCR_CORRECTIONS_BASE[wrong]
+        try:
+            with open(DICTIONARY_BASE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(OCR_CORRECTIONS_BASE, f, ensure_ascii=False, indent=2)
+            load_dictionaries()
+            return True
+        except Exception as e:
+            logger.error(f"[DICTIONARY] Error guardando diccionario base: {e}")
+            return False
+    return False
+
+
+# Cargar diccionarios al iniciar
+load_dictionaries()
+
+
+def apply_ocr_corrections(text):
+    """
+    Aplica correcciones de diccionario al texto extraído por OCR.
+
+    Args:
+        text: Texto extraído del OCR
+
+    Returns:
+        Texto con correcciones aplicadas
+    """
+    if not text:
+        return text
+
+    corrected = text
+    corrections_applied = 0
+
+    # Aplicar correcciones de diccionario
+    for wrong, correct in OCR_CORRECTIONS.items():
+        if wrong in corrected:
+            corrected = corrected.replace(wrong, correct)
+            corrections_applied += 1
+
+    # Aplicar correcciones regex
+    for pattern, replacement in OCR_REGEX_CORRECTIONS:
+        if pattern.search(corrected):
+            corrected = pattern.sub(replacement, corrected)
+            corrections_applied += 1
+
+    if corrections_applied > 0:
+        logger.info(f"[OCR CORRECTIONS] Aplicadas {corrections_applied} correcciones de diccionario")
+
+    return corrected
+
 
 # ============================================================================
 # FUNCIÓN LAYOUT: Reconstrucción espacial usando coordenadas de bounding boxes
@@ -2173,6 +2655,7 @@ def dashboard():
         <div class="tabs">
             <button class="tab active" onclick="showTab('dashboard')">Dashboard</button>
             <button class="tab" onclick="showTab('test')">Probar OCR</button>
+            <button class="tab" onclick="showTab('dictionary')">Diccionario</button>
             <button class="tab" onclick="showTab('history')">Historial</button>
             <button class="tab" onclick="showTab('docs')">Documentacion</button>
         </div>
@@ -2263,6 +2746,111 @@ def dashboard():
                 <h3 id="resultTitle"></h3>
                 <div class="result-stats" id="resultStats"></div>
                 <div class="result-text" id="resultText"></div>
+            </div>
+        </div>
+
+        <!-- Tab: Dictionary -->
+        <div id="dictionary" class="tab-content">
+            <h2>Diccionario de Correcciones OCR</h2>
+            <p>Gestiona las correcciones automaticas para errores comunes del OCR en facturas y tickets.</p>
+
+            <div class="stats-grid" id="dictStats">
+                <div class="stat-card">
+                    <div class="stat-value" id="baseCount">{len(OCR_CORRECTIONS_BASE)}</div>
+                    <div class="stat-label">Base</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="customCount">{len(OCR_CORRECTIONS_CUSTOM)}</div>
+                    <div class="stat-label">Personalizadas</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="totalCount">{len(OCR_CORRECTIONS)}</div>
+                    <div class="stat-label">Total Activas</div>
+                </div>
+            </div>
+
+            <h3>Añadir Nueva Correccion</h3>
+            <div class="ocr-form" style="padding:20px;">
+                <div style="display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end;">
+                    <div>
+                        <label style="display:block;margin-bottom:5px;">Error OCR (ej: Cad1z):</label>
+                        <input type="text" id="wrongText" placeholder="Texto con error" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;">
+                    </div>
+                    <div>
+                        <label style="display:block;margin-bottom:5px;">Correccion (ej: Cadiz):</label>
+                        <input type="text" id="correctText" placeholder="Texto correcto" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;">
+                    </div>
+                    <div>
+                        <label style="display:block;margin-bottom:5px;">Tipo:</label>
+                        <select id="dictType" style="padding:10px;border:1px solid #ddd;border-radius:5px;">
+                            <option value="custom">Personalizado</option>
+                            <option value="base">Base</option>
+                        </select>
+                    </div>
+                    <button onclick="addCorrection()" class="btn btn-primary" style="padding:10px 20px;">Añadir</button>
+                </div>
+                <div id="addResult" style="margin-top:10px;display:none;"></div>
+            </div>
+
+            <h3>Probar Correcciones</h3>
+            <div class="ocr-form" style="padding:20px;">
+                <div class="form-group">
+                    <label>Texto con errores (pega aqui el texto del OCR):</label>
+                    <textarea id="testText" rows="4" style="width:100%;padding:10px;border:1px solid #ddd;border-radius:5px;font-family:monospace;" placeholder="Ej: Cad1z, N.1.F: 12345678A, TOTA1: 55:23 EUR"></textarea>
+                </div>
+                <button onclick="testCorrections()" class="btn btn-primary">Probar Correcciones</button>
+                <div id="testResult" style="margin-top:15px;display:none;">
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:15px;">
+                        <div>
+                            <strong>Original:</strong>
+                            <pre id="testOriginal" style="background:#f8d7da;padding:10px;border-radius:5px;max-height:200px;overflow:auto;"></pre>
+                        </div>
+                        <div>
+                            <strong>Corregido:</strong>
+                            <pre id="testCorrected" style="background:#d4edda;padding:10px;border-radius:5px;max-height:200px;overflow:auto;"></pre>
+                        </div>
+                    </div>
+                    <div id="testApplied" style="margin-top:10px;"></div>
+                </div>
+            </div>
+
+            <h3>Analizar Documento</h3>
+            <div class="ocr-form" style="padding:20px;">
+                <p style="color:#666;">Sube un documento para analizar y detectar posibles errores OCR.</p>
+                <div class="form-group">
+                    <input type="file" id="analyzeFile" accept=".pdf,.png,.jpg,.jpeg,.bmp,.tiff,.tif">
+                </div>
+                <button onclick="analyzeDocument()" class="btn btn-primary" id="analyzeBtn">Analizar</button>
+                <div id="analyzeLoading" style="display:none;text-align:center;padding:20px;">
+                    <div class="spinner"></div>
+                    <p>Analizando documento...</p>
+                </div>
+                <div id="analyzeResult" style="margin-top:15px;display:none;"></div>
+            </div>
+
+            <h3>Diccionario Base (solo lectura)</h3>
+            <div style="max-height:300px;overflow-y:auto;background:#f8f9fa;padding:15px;border-radius:8px;margin-bottom:20px;">
+                <table style="width:100%;border-collapse:collapse;">
+                    <thead><tr style="background:#667eea;color:white;"><th style="padding:8px;text-align:left;">Error</th><th style="padding:8px;text-align:left;">Correccion</th></tr></thead>
+                    <tbody id="baseDict">
+                        {"".join(f'<tr><td style="padding:6px;border-bottom:1px solid #ddd;font-family:monospace;">{wrong}</td><td style="padding:6px;border-bottom:1px solid #ddd;">{correct}</td></tr>' for wrong, correct in list(OCR_CORRECTIONS_BASE.items())[:50])}
+                        <tr><td colspan="2" style="padding:10px;text-align:center;color:#666;">... y {max(0, len(OCR_CORRECTIONS_BASE)-50)} mas</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3>Diccionario Personalizado</h3>
+            <div style="max-height:300px;overflow-y:auto;background:#f8f9fa;padding:15px;border-radius:8px;">
+                <div id="customDictEmpty" style="{{'display:none' if OCR_CORRECTIONS_CUSTOM else 'block'}};text-align:center;padding:20px;color:#666;">
+                    <p>No hay correcciones personalizadas todavia.</p>
+                    <p>Añade correcciones arriba para empezar.</p>
+                </div>
+                <table id="customDictTable" style="width:100%;border-collapse:collapse;{{'display:table' if OCR_CORRECTIONS_CUSTOM else 'display:none'}}">
+                    <thead><tr style="background:#764ba2;color:white;"><th style="padding:8px;text-align:left;">Error</th><th style="padding:8px;text-align:left;">Correccion</th><th style="padding:8px;width:80px;">Accion</th></tr></thead>
+                    <tbody id="customDict">
+                        {"".join('<tr id="row_' + wrong + '"><td style="padding:6px;border-bottom:1px solid #ddd;font-family:monospace;">' + wrong + '</td><td style="padding:6px;border-bottom:1px solid #ddd;">' + correct + '</td><td style="padding:6px;border-bottom:1px solid #ddd;"><button onclick="removeCorrection(' + "'" + wrong + "'" + ')" class="btn btn-danger" style="padding:5px 10px;font-size:0.8em;">Eliminar</button></td></tr>' for wrong, correct in OCR_CORRECTIONS_CUSTOM.items())}
+                    </tbody>
+                </table>
             </div>
         </div>
 
@@ -2483,6 +3071,176 @@ Body Parameters:
                 alert('Error limpiando historial');
             }}
         }}
+
+        // ========== DICTIONARY FUNCTIONS ==========
+
+        async function addCorrection() {{
+            const wrong = document.getElementById('wrongText').value.trim();
+            const correct = document.getElementById('correctText').value.trim();
+            const dictType = document.getElementById('dictType').value;
+            const resultDiv = document.getElementById('addResult');
+
+            if (!wrong || !correct) {{
+                resultDiv.innerHTML = '<span style="color:red;">Error: Completa ambos campos</span>';
+                resultDiv.style.display = 'block';
+                return;
+            }}
+
+            try {{
+                const response = await fetch('/api/dictionary/add', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{ wrong, correct, dictionary: dictType }})
+                }});
+                const data = await response.json();
+
+                if (data.success) {{
+                    resultDiv.innerHTML = `<span style="color:green;">✓ ${{data.message}}</span>`;
+                    document.getElementById('wrongText').value = '';
+                    document.getElementById('correctText').value = '';
+                    updateDictStats(data.stats);
+                    // Recargar pagina para actualizar tablas
+                    setTimeout(() => location.reload(), 1000);
+                }} else {{
+                    resultDiv.innerHTML = `<span style="color:red;">✗ ${{data.error}}</span>`;
+                }}
+                resultDiv.style.display = 'block';
+            }} catch (error) {{
+                resultDiv.innerHTML = `<span style="color:red;">Error: ${{error.message}}</span>`;
+                resultDiv.style.display = 'block';
+            }}
+        }}
+
+        async function removeCorrection(wrong) {{
+            if (!confirm(`Eliminar correccion para "${{wrong}}"?`)) return;
+
+            try {{
+                const response = await fetch('/api/dictionary/remove', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{ wrong, dictionary: 'custom' }})
+                }});
+                const data = await response.json();
+
+                if (data.success) {{
+                    document.getElementById(`row_${{wrong}}`).remove();
+                    updateDictStats(data.stats);
+                }} else {{
+                    alert('Error: ' + data.error);
+                }}
+            }} catch (error) {{
+                alert('Error: ' + error.message);
+            }}
+        }}
+
+        async function testCorrections() {{
+            const text = document.getElementById('testText').value;
+            const resultDiv = document.getElementById('testResult');
+
+            if (!text) {{
+                alert('Introduce texto para probar');
+                return;
+            }}
+
+            try {{
+                const response = await fetch('/api/dictionary/test', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{ text }})
+                }});
+                const data = await response.json();
+
+                if (data.success) {{
+                    document.getElementById('testOriginal').textContent = data.original;
+                    document.getElementById('testCorrected').textContent = data.corrected;
+
+                    let appliedHtml = '';
+                    if (data.corrections_applied.length > 0) {{
+                        appliedHtml = '<strong>Correcciones aplicadas:</strong><ul>';
+                        data.corrections_applied.forEach(c => {{
+                            if (c.wrong) {{
+                                appliedHtml += `<li><code>${{c.wrong}}</code> → <code>${{c.correct}}</code> (${{c.count}}x)</li>`;
+                            }} else {{
+                                appliedHtml += `<li>Patron: <code>${{c.pattern}}</code> (${{c.count}}x)</li>`;
+                            }}
+                        }});
+                        appliedHtml += '</ul>';
+                    }} else {{
+                        appliedHtml = '<span style="color:#666;">No se aplicaron correcciones</span>';
+                    }}
+                    document.getElementById('testApplied').innerHTML = appliedHtml;
+                    resultDiv.style.display = 'block';
+                }}
+            }} catch (error) {{
+                alert('Error: ' + error.message);
+            }}
+        }}
+
+        async function analyzeDocument() {{
+            const fileInput = document.getElementById('analyzeFile');
+            const loading = document.getElementById('analyzeLoading');
+            const resultDiv = document.getElementById('analyzeResult');
+            const btn = document.getElementById('analyzeBtn');
+
+            if (!fileInput.files[0]) {{
+                alert('Selecciona un archivo');
+                return;
+            }}
+
+            btn.disabled = true;
+            loading.style.display = 'block';
+            resultDiv.style.display = 'none';
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+
+            try {{
+                const response = await fetch('/api/dictionary/analyze', {{
+                    method: 'POST',
+                    body: formData
+                }});
+                const data = await response.json();
+
+                loading.style.display = 'none';
+                btn.disabled = false;
+
+                if (data.success) {{
+                    let html = `<p><strong>Tiempo:</strong> ${{data.processing_time}}s | <strong>Bloques:</strong> ${{data.blocks_count}}</p>`;
+
+                    if (data.potential_errors.length > 0) {{
+                        html += `<h4 style="color:#dc3545;">Posibles errores detectados: ${{data.potential_errors_count}}</h4>`;
+                        html += '<table style="width:100%;border-collapse:collapse;background:white;">';
+                        html += '<thead><tr style="background:#f8d7da;"><th style="padding:8px;">Texto</th><th style="padding:8px;">Razon</th><th style="padding:8px;">Accion</th></tr></thead><tbody>';
+                        data.potential_errors.forEach(e => {{
+                            html += '<tr><td style="padding:6px;border:1px solid #ddd;font-family:monospace;">' + e.text + '</td><td style="padding:6px;border:1px solid #ddd;">' + e.reason + '</td><td style="padding:6px;border:1px solid #ddd;"><button onclick="document.getElementById(\\'wrongText\\').value=\\'' + e.text + '\\';document.getElementById(\\'wrongText\\').focus();" class="btn btn-primary" style="padding:3px 8px;font-size:0.8em;">Añadir correccion</button></td></tr>';
+                        }});
+                        html += '</tbody></table>';
+                    }} else {{
+                        html += '<p style="color:green;">✓ No se detectaron errores sospechosos</p>';
+                    }}
+
+                    html += '<h4>Texto OCR (corregido):</h4>';
+                    html += `<pre style="background:white;padding:10px;max-height:200px;overflow:auto;">${{data.ocr_text_corrected}}</pre>`;
+
+                    resultDiv.innerHTML = html;
+                    resultDiv.style.display = 'block';
+                }} else {{
+                    resultDiv.innerHTML = `<p style="color:red;">Error: ${{data.error}}</p>`;
+                    resultDiv.style.display = 'block';
+                }}
+            }} catch (error) {{
+                loading.style.display = 'none';
+                btn.disabled = false;
+                resultDiv.innerHTML = `<p style="color:red;">Error: ${{error.message}}</p>`;
+                resultDiv.style.display = 'block';
+            }}
+        }}
+
+        function updateDictStats(stats) {{
+            document.getElementById('baseCount').textContent = stats.base_count;
+            document.getElementById('customCount').textContent = stats.custom_count;
+            document.getElementById('totalCount').textContent = stats.total_count;
+        }}
     </script>
 </body>
 </html>
@@ -2609,19 +3367,33 @@ def process():
         if response_json.get('success'):
             server_stats['successful_requests'] += 1
 
-            extracted_text = response_json.get('extracted_text', '')
+            # Obtener ambas versiones del texto
+            extracted_text_plain = response_json.get('extracted_text_plain', response_json.get('extracted_text', ''))
+            extracted_text_layout = response_json.get('extracted_text_layout', '')
             ocr_blocks = response_json.get('ocr_blocks', [])
             coordinates = response_json.get('coordinates', [])
             stats = response_json.get('stats', {})
 
             # Aplicar formato según selección del usuario
-            if output_format == 'layout' and ocr_blocks and coordinates:
-                # Layout: reconstruir estructura espacial usando coordenadas
-                formatted_text = format_text_with_layout(ocr_blocks, coordinates, page_width=120)
-                logger.info(f"[PROCESS] Modo Layout aplicado - {len(ocr_blocks)} bloques con coordenadas")
+            if output_format == 'layout':
+                # Layout: usar texto con estructura espacial
+                if extracted_text_layout:
+                    formatted_text = extracted_text_layout
+                    logger.info(f"[PROCESS] Modo Layout aplicado - {len(formatted_text)} chars con estructura espacial")
+                elif ocr_blocks and coordinates:
+                    # Fallback: reconstruir desde OCR si no hay texto layout
+                    formatted_text = format_text_with_layout(ocr_blocks, coordinates, page_width=120)
+                    logger.info(f"[PROCESS] Modo Layout (OCR) - {len(ocr_blocks)} bloques")
+                else:
+                    formatted_text = extracted_text_plain
+                    logger.info(f"[PROCESS] Modo Layout fallback a texto plano")
             else:
-                # Normal: texto plano extraído del PDF
-                formatted_text = extracted_text
+                # Normal: texto plano sin estructura espacial (más rápido de procesar)
+                formatted_text = extracted_text_plain
+                logger.info(f"[PROCESS] Modo Normal - {len(formatted_text)} chars texto plano")
+
+            # Aplicar correcciones del diccionario OCR
+            formatted_text = apply_ocr_corrections(formatted_text)
 
             result = {
                 'success': True,
@@ -2845,6 +3617,225 @@ def api_history_clear():
         'success': True,
         'message': 'Historial limpiado'
     })
+
+
+# ============================================================================
+# API DE DICCIONARIOS
+# ============================================================================
+
+@app.route('/api/dictionary')
+def api_dictionary():
+    """Obtiene todos los diccionarios"""
+    return jsonify({
+        'success': True,
+        'base': OCR_CORRECTIONS_BASE,
+        'custom': OCR_CORRECTIONS_CUSTOM,
+        'combined': OCR_CORRECTIONS,
+        'stats': {
+            'base_count': len(OCR_CORRECTIONS_BASE),
+            'custom_count': len(OCR_CORRECTIONS_CUSTOM),
+            'total_count': len(OCR_CORRECTIONS)
+        }
+    })
+
+
+@app.route('/api/dictionary/add', methods=['POST'])
+def api_dictionary_add():
+    """Añade una corrección al diccionario"""
+    data = request.get_json() or {}
+    wrong = data.get('wrong', '').strip()
+    correct = data.get('correct', '').strip()
+    dictionary = data.get('dictionary', 'custom')
+
+    if not wrong or not correct:
+        return jsonify({'success': False, 'error': 'Faltan campos wrong/correct'}), 400
+
+    if wrong == correct:
+        return jsonify({'success': False, 'error': 'El error y la corrección no pueden ser iguales'}), 400
+
+    success = add_correction(wrong, correct, dictionary)
+    return jsonify({
+        'success': success,
+        'message': f'Añadida corrección: "{wrong}" → "{correct}"' if success else 'Error al guardar',
+        'stats': {
+            'base_count': len(OCR_CORRECTIONS_BASE),
+            'custom_count': len(OCR_CORRECTIONS_CUSTOM),
+            'total_count': len(OCR_CORRECTIONS)
+        }
+    })
+
+
+@app.route('/api/dictionary/remove', methods=['POST'])
+def api_dictionary_remove():
+    """Elimina una corrección del diccionario"""
+    data = request.get_json() or {}
+    wrong = data.get('wrong', '').strip()
+    dictionary = data.get('dictionary', 'custom')
+
+    if not wrong:
+        return jsonify({'success': False, 'error': 'Falta campo wrong'}), 400
+
+    success = remove_correction(wrong, dictionary)
+    return jsonify({
+        'success': success,
+        'message': f'Eliminada corrección: "{wrong}"' if success else 'No se encontró la corrección',
+        'stats': {
+            'base_count': len(OCR_CORRECTIONS_BASE),
+            'custom_count': len(OCR_CORRECTIONS_CUSTOM),
+            'total_count': len(OCR_CORRECTIONS)
+        }
+    })
+
+
+@app.route('/api/dictionary/reload', methods=['POST'])
+def api_dictionary_reload():
+    """Recarga los diccionarios desde archivos"""
+    load_dictionaries()
+    return jsonify({
+        'success': True,
+        'message': 'Diccionarios recargados',
+        'stats': {
+            'base_count': len(OCR_CORRECTIONS_BASE),
+            'custom_count': len(OCR_CORRECTIONS_CUSTOM),
+            'total_count': len(OCR_CORRECTIONS)
+        }
+    })
+
+
+@app.route('/api/dictionary/test', methods=['POST'])
+def api_dictionary_test():
+    """Prueba las correcciones de diccionario sobre un texto"""
+    data = request.get_json() or {}
+    text = data.get('text', '')
+
+    if not text:
+        return jsonify({'success': False, 'error': 'Falta campo text'}), 400
+
+    # Aplicar correcciones
+    corrected = text
+    applied = []
+
+    for wrong, correct in OCR_CORRECTIONS.items():
+        if wrong in corrected:
+            count = corrected.count(wrong)
+            corrected = corrected.replace(wrong, correct)
+            applied.append({'wrong': wrong, 'correct': correct, 'count': count})
+
+    for pattern, replacement in OCR_REGEX_CORRECTIONS:
+        matches = pattern.findall(corrected)
+        if matches:
+            corrected = pattern.sub(replacement, corrected)
+            applied.append({'pattern': pattern.pattern, 'replacement': replacement, 'count': len(matches)})
+
+    return jsonify({
+        'success': True,
+        'original': text,
+        'corrected': corrected,
+        'corrections_applied': applied,
+        'total_corrections': len(applied)
+    })
+
+
+@app.route('/api/dictionary/analyze', methods=['POST'])
+def api_dictionary_analyze():
+    """
+    Analiza una imagen/PDF con OCR y sugiere correcciones.
+    Opcionalmente puede usar Vision AI para comparar.
+    """
+    global server_stats
+    start_time = time.time()
+    temp_file_path = None
+
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'Empty filename'}), 400
+
+        # Parámetro para API de Vision (opcional)
+        vision_api_key = request.form.get('vision_api_key', '')
+        vision_provider = request.form.get('vision_provider', 'none')  # none, openai, gemini, anthropic
+
+        # Guardar archivo temporal
+        n8nHomeDir = '/home/n8n'
+        os.makedirs(f"{n8nHomeDir}/in", exist_ok=True)
+
+        temp_filename = f"analyze_dict_{int(time.time())}_{file.filename}"
+        temp_file_path = f"{n8nHomeDir}/in/{temp_filename}"
+        file.save(temp_file_path)
+
+        # Procesar con OCR
+        with app.test_request_context('/ocr', method='POST', data={'filename': temp_file_path}):
+            response = ocr()
+            if isinstance(response, tuple):
+                response_data, status_code = response
+            else:
+                response_data = response
+            response_json = response_data.get_json()
+
+        # Limpiar archivo temporal
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+        if not response_json.get('success'):
+            return jsonify({'success': False, 'error': response_json.get('error', 'OCR failed')}), 500
+
+        ocr_text = response_json.get('extracted_text_plain', '')
+        ocr_blocks = response_json.get('ocr_blocks', [])
+
+        # Análisis de texto para detectar posibles errores
+        potential_errors = []
+
+        # Patrones comunes de errores OCR
+        error_patterns = [
+            (r'\b\d[a-zA-Z]\b', 'Número+letra sospechoso'),
+            (r'\b[a-zA-Z]\d[a-zA-Z]\b', 'Letra+número+letra'),
+            (r'\b[A-Z]{2,}\d[A-Z]*\b', 'Mayúsculas con número'),
+            (r'[|l1]VA\b', 'Posible IVA mal leído'),
+            (r'\bN[.|]?[1Il][.|]?F\b', 'Posible NIF mal leído'),
+            (r'\bC[.|]?[1Il][.|]?F\b', 'Posible CIF mal leído'),
+            (r'\d+:\d{2}\b', 'Posible precio con : en vez de ,'),
+        ]
+
+        for pattern, description in error_patterns:
+            matches = re.findall(pattern, ocr_text)
+            for match in matches:
+                if match not in OCR_CORRECTIONS:  # Solo si no está ya corregido
+                    potential_errors.append({
+                        'text': match,
+                        'reason': description,
+                        'pattern': pattern
+                    })
+
+        # Vision AI comparison (si se proporciona API key)
+        vision_result = None
+        if vision_api_key and vision_provider != 'none':
+            vision_result = {'status': 'not_implemented', 'message': 'Vision AI comparison coming soon'}
+            # TODO: Implementar llamada a API de Vision (OpenAI, Gemini, Anthropic)
+
+        processing_time = time.time() - start_time
+
+        return jsonify({
+            'success': True,
+            'ocr_text': ocr_text,
+            'ocr_text_corrected': apply_ocr_corrections(ocr_text),
+            'blocks_count': len(ocr_blocks),
+            'potential_errors': potential_errors,
+            'potential_errors_count': len(potential_errors),
+            'vision_result': vision_result,
+            'processing_time': round(processing_time, 3)
+        })
+
+    except Exception as e:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except:
+                pass
+        logger.error(f"[DICTIONARY ANALYZE ERROR] {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ============================================================================

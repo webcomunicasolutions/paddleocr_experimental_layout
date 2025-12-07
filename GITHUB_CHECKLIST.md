@@ -1,42 +1,103 @@
-# ✅ Checklist para Publicar en GitHub
+# Checklist para Publicar en GitHub
 
 ## Archivos Listos para GitHub
 
-### ✅ Archivos Principales
-- [x] `app.py` (2331 líneas) - Aplicación completa
-- [x] `Dockerfile` - Configuración Docker
-- [x] `docker-compose.yml` - Orquestación
-- [x] `README.md` - Documentación principal
-- [x] `CLAUDE.md` - Guía de desarrollo
+### Archivos Principales
+- [x] `app.py` (~3400 lineas) - Aplicacion completa con todas las funcionalidades
+- [x] `Dockerfile` - Configuracion Docker optimizada
+- [x] `docker-compose.yml` - Orquestacion con volumenes para diccionarios
+- [x] `README.md` - Documentacion principal
+- [x] `CLAUDE.md` - Guia de desarrollo
 - [x] `LICENSE` - Licencia MIT
 - [x] `.gitignore` - Exclusiones Git
 - [x] `.env.example` - Plantilla de variables de entorno
+- [x] `VOLUMES_EXPLAINED.md` - Documentacion de volumenes Docker
+- [x] `INVESTIGATION_NOTES.md` - Notas de investigacion y debug
 
-### ✅ Documentación Completa
+### Documentacion Completa
 - [x] README.md con:
-  - Descripción del enfoque
-  - Instalación rápida
+  - Descripcion del enfoque
+  - Instalacion rapida
   - Ejemplos de uso
-  - Casos de uso
+  - Todos los endpoints documentados
+  - Sistema de diccionarios
   - FAQ
 - [x] CLAUDE.md para desarrollo
 - [x] LICENSE con atribuciones
 
-### ✅ Configuración Docker
-- [x] Dockerfile optimizado
-- [x] docker-compose.yml configurado
+### Configuracion Docker
+- [x] Dockerfile optimizado con Python 3.10 y PaddleOCR 3.x
+- [x] docker-compose.yml con volumenes persistentes:
+  - `paddlex-models` - Modelos PaddleX
+  - `paddleocr-models` - Modelos PaddleOCR
+  - `ocr-dictionaries` - Diccionarios personalizados
 - [x] .env.example con todas las variables
 
-## 📋 Pasos para Publicar
+## Funcionalidades Implementadas
+
+### Sistema OCR
+- [x] PaddleOCR 3.x con PP-OCRv3 (modelo servidor)
+- [x] Soporte para idioma espanol (`lang=es`)
+- [x] Preprocesamiento OpenCV completo
+- [x] Correccion de perspectiva
+- [x] Correccion de orientacion automatica
+- [x] Correccion de inclinacion (deskew)
+- [x] Procesamiento multi-pagina PDF
+- [x] Auto-recuperacion de errores std::exception
+
+### Modo Layout (EXPERIMENTAL)
+- [x] Reconstruccion espacial usando coordenadas de bounding boxes
+- [x] Preservacion de estructura de facturas/tickets
+- [x] Agrupacion por proximidad vertical (threshold 20px)
+
+### Sistema de Diccionarios OCR
+- [x] Diccionario BASE con 60+ correcciones para:
+  - Ciudades espanolas (Cadiz, Cordoba, Almeria, etc.)
+  - Terminos fiscales (NIF, CIF, IVA, IRPF, etc.)
+  - Conceptos comunes (Total, Importe, Factura, etc.)
+  - Productos (Gasoleo, Gasolina, Electricidad, etc.)
+- [x] Diccionario PERSONALIZADO (persistente en Docker volume)
+- [x] Patron regex para correccion de precios (`:` -> `,`)
+- [x] API REST completa para gestion de diccionarios
+- [x] UI en Dashboard para visualizar/editar correcciones
+
+### Dashboard Web
+- [x] Tab "Estado" - Estadisticas del servidor
+- [x] Tab "Test OCR" - Subir y procesar documentos
+- [x] Tab "Diccionario" - Gestion de correcciones OCR
+- [x] Tab "Historial" - Ultimos procesamientos
+- [x] Tab "Ayuda" - Documentacion y endpoints
+
+### Endpoints API
+
+#### Core (Paco's Base)
+- [x] `GET /health` - Estado del servidor
+- [x] `POST /ocr` - Endpoint original n8n
+
+#### REST Layer (Webcomunica)
+- [x] `GET /` - Dashboard web interactivo
+- [x] `GET /stats` - Estadisticas JSON
+- [x] `POST /process` - OCR via API REST (formatos: normal, layout)
+- [x] `POST /analyze` - Analisis detallado
+
+#### Dictionary API
+- [x] `GET /api/dictionary` - Obtener todos los diccionarios
+- [x] `POST /api/dictionary/add` - Anadir correccion
+- [x] `POST /api/dictionary/remove` - Eliminar correccion
+- [x] `POST /api/dictionary/reload` - Recargar desde archivos
+- [x] `POST /api/dictionary/test` - Probar correcciones en texto
+- [x] `POST /api/dictionary/analyze` - Analizar documento para errores
+
+## Pasos para Publicar
 
 ### 1. Crear Repositorio en GitHub
 
 ```bash
 # En GitHub.com:
 # 1. Click "New repository"
-# 2. Nombre: paddleocr-fusion-v3
-# 3. Descripción: "PaddleOCR 3.x with REST API - Advanced OCR preprocessing + professional API endpoints"
-# 4. Public o Private (tu elección)
+# 2. Nombre: paddleocr-fusion-v3 o paddleocr-experimental-layout
+# 3. Descripcion: "PaddleOCR 3.x with REST API, Layout Mode, and OCR Dictionary System"
+# 4. Public o Private (tu eleccion)
 # 5. NO marcar "Initialize with README" (ya lo tienes)
 # 6. Click "Create repository"
 ```
@@ -44,34 +105,38 @@
 ### 2. Inicializar Git Local
 
 ```bash
-cd "C:\PROYECTOS CLAUDE\paddleocr\paddleocr_webcomunicav3_fusion"
+cd "/mnt/c/PROYECTOS CLAUDE/paddleocr/paddleocr_experimental_layout"
 
-# Inicializar repositorio
-git init
+# Verificar archivos que se van a subir
+git status
 
 # Añadir todos los archivos
 git add .
 
-# Ver qué se va a commitear
+# Ver que se va a commitear
 git status
 
 # Primer commit
-git commit -m "Initial commit: PaddleOCR Fusion v3
+git commit -m "Initial commit: PaddleOCR Fusion v3 with Layout Mode
 
-- Base: Paco's PaddleOCR 3.x project (complete preprocessing pipeline)
-- Added: Professional REST API layer
-- Added: Interactive web dashboard
-- Added: Statistics and monitoring
-- Endpoints: /, /health, /stats, /process, /analyze, /ocr
-- Fully compatible with n8n workflows
-- 100% of Paco's processing logic maintained"
+Features:
+- PaddleOCR 3.x with PP-OCRv3 Spanish model
+- Layout mode for invoice/ticket text reconstruction
+- OCR Dictionary System with 60+ Spanish corrections
+- Auto-recovery from std::exception errors
+- Professional REST API layer (10+ endpoints)
+- Interactive web dashboard
+- Docker with persistent volumes
+
+Base: Paco's PaddleOCR 3.x project
+Layer: webcomunica REST API + Dictionary System"
 ```
 
 ### 3. Conectar con GitHub
 
 ```bash
 # Reemplaza YOUR_USERNAME con tu usuario de GitHub
-git remote add origin https://github.com/YOUR_USERNAME/paddleocr-fusion-v3.git
+git remote add origin https://github.com/YOUR_USERNAME/paddleocr-experimental-layout.git
 
 # Push inicial
 git branch -M main
@@ -81,57 +146,61 @@ git push -u origin main
 ### 4. Verificar en GitHub
 
 Verifica que aparezcan:
-- [x] README.md renderizado en la página principal
+- [x] README.md renderizado en la pagina principal
 - [x] app.py, Dockerfile, docker-compose.yml visibles
 - [x] LICENSE visible
 - [x] .gitignore funcionando (no debe aparecer .env, __pycache__, etc.)
 
-## 🎯 Estructura Final en GitHub
+## Estructura Final en GitHub
 
 ```
-paddleocr-fusion-v3/
-├── README.md                    ← Documentación principal
-├── CLAUDE.md                    ← Guía de desarrollo
-├── LICENSE                      ← Licencia MIT
-├── .gitignore                   ← Exclusiones
-├── .env.example                 ← Plantilla de configuración
-├── app.py                       ← Aplicación principal (2331 líneas)
-├── Dockerfile                   ← Docker build
-└── docker-compose.yml           ← Orquestación Docker
+paddleocr-experimental-layout/
+├── README.md                    <- Documentacion principal
+├── CLAUDE.md                    <- Guia de desarrollo
+├── GITHUB_CHECKLIST.md          <- Este archivo
+├── VOLUMES_EXPLAINED.md         <- Explicacion de volumenes Docker
+├── INVESTIGATION_NOTES.md       <- Notas de debug
+├── LICENSE                      <- Licencia MIT
+├── .gitignore                   <- Exclusiones
+├── .env.example                 <- Plantilla de configuracion
+├── app.py                       <- Aplicacion principal (~3400 lineas)
+├── Dockerfile                   <- Docker build
+└── docker-compose.yml           <- Orquestacion Docker
 ```
 
-## 📝 Descripción Sugerida para GitHub
+## Descripcion Sugerida para GitHub
 
 ### Short Description
 ```
-PaddleOCR 3.x with REST API - Advanced OCR preprocessing + professional API endpoints
+PaddleOCR 3.x with REST API, Layout Mode for invoices, and OCR Dictionary System for Spanish documents
 ```
 
 ### About / Topics
 ```
-Topics: paddleocr, ocr, rest-api, docker, python, opencv, preprocessing, n8n, flask, paddlepaddle
+Topics: paddleocr, ocr, rest-api, docker, python, opencv, preprocessing, n8n, flask, paddlepaddle, invoices, spanish-ocr, layout
 ```
 
 ### Detailed Description (para README badges)
 ```markdown
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
-[![Python](https://img.shields.io/badge/python-3.x-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/)
 [![PaddleOCR](https://img.shields.io/badge/PaddleOCR-3.x-orange.svg)](https://github.com/PaddlePaddle/PaddleOCR)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Professional REST API layer built on top of PaddleOCR 3.x with advanced OpenCV preprocessing.
+Professional REST API layer built on top of PaddleOCR 3.x with Layout Mode and OCR Dictionary System.
 
 **Features:**
-- 🚀 PaddleOCR 3.x with full preprocessing pipeline
-- 🔌 Professional REST API (6 endpoints)
-- 📊 Interactive web dashboard
-- 🔧 OpenCV preprocessing (perspective, orientation, deskew)
-- 📄 Multi-page PDF processing
-- 🤖 n8n workflow integration
-- 🐳 Docker ready
+- PaddleOCR 3.x with PP-OCRv3 Spanish model
+- Layout mode for invoice/ticket text reconstruction
+- OCR Dictionary System with 60+ Spanish corrections
+- Auto-recovery from std::exception errors
+- Professional REST API layer (10+ endpoints)
+- Interactive web dashboard
+- Docker with persistent volumes
+- n8n workflow integration
 ```
 
-## ⚠️ Antes de Publicar
+## Antes de Publicar
 
 ### Verificar que NO se suban:
 - [ ] `.env` (variables de entorno reales)
@@ -140,37 +209,27 @@ Professional REST API layer built on top of PaddleOCR 3.x with advanced OpenCV p
 - [ ] `data/` (archivos de prueba)
 - [ ] Archivos de prueba personales
 
-### Verificar que SÍ se suban:
+### Verificar que SI se suban:
 - [x] `.env.example` (plantilla)
 - [x] `.gitignore` (configurado)
-- [x] `README.md` (documentación)
-- [x] `CLAUDE.md` (guía de desarrollo)
+- [x] `README.md` (documentacion)
+- [x] `CLAUDE.md` (guia de desarrollo)
+- [x] `GITHUB_CHECKLIST.md` (este archivo)
+- [x] `VOLUMES_EXPLAINED.md` (volumenes)
+- [x] `INVESTIGATION_NOTES.md` (notas debug)
 - [x] `LICENSE` (licencia)
-- [x] `app.py` (código)
+- [x] `app.py` (codigo)
 - [x] `Dockerfile` y `docker-compose.yml`
 
-## 🔒 Información Sensible
+## Informacion Sensible
 
-**IMPORTANTE**: Este proyecto NO contiene información sensible porque:
-- ✅ No hay claves API hardcoded
-- ✅ No hay contraseñas en el código
-- ✅ Variables de entorno en `.env.example` (template)
-- ✅ `.gitignore` excluye `.env` real
+**IMPORTANTE**: Este proyecto NO contiene informacion sensible porque:
+- No hay claves API hardcoded
+- No hay contrasenas en el codigo
+- Variables de entorno en `.env.example` (template)
+- `.gitignore` excluye `.env` real
 
-## 📖 README en GitHub
-
-El README.md actual ya incluye:
-- [x] Descripción clara del proyecto
-- [x] Arquitectura visual
-- [x] Instalación rápida
-- [x] Ejemplos de uso
-- [x] Casos de uso
-- [x] Configuración
-- [x] Comparación con proyectos base
-- [x] FAQ
-- [x] Agradecimientos
-
-## 🎉 Después de Publicar
+## Despues de Publicar
 
 ### Compartir el proyecto:
 1. Añadir el link en tu perfil
@@ -182,24 +241,40 @@ El README.md actual ya incluye:
 ```bash
 # Para futuros cambios
 git add .
-git commit -m "Descripción del cambio"
+git commit -m "Descripcion del cambio"
 git push
 ```
 
-## 🔗 Links Útiles
+## Links Utiles
 
 - **PaddleOCR Oficial**: https://github.com/PaddlePaddle/PaddleOCR
 - **PaddlePaddle Oficial**: https://github.com/PaddlePaddle/Paddle
 - **Docker Hub**: https://hub.docker.com/
 
-## ✅ Estado Final
+## Estado Final
 
-**PROYECTO LISTO PARA GITHUB** ✅
+**PROYECTO LISTO PARA GITHUB**
 
-Todos los archivos están preparados y documentados. Puedes proceder a publicar siguiendo los pasos anteriores.
+Todos los archivos estan preparados y documentados. Puedes proceder a publicar siguiendo los pasos anteriores.
 
 ---
 
-**Última verificación**: 2025-01-13
-**Versión**: 3.0.0-fusion
-**Estado**: ✅ Production Ready
+**Ultima verificacion**: 2025-12-07
+**Version**: 3.1.0-experimental-layout
+**Estado**: Production Ready
+
+## Changelog
+
+### v3.1.0 (2025-12-07)
+- Añadido: Sistema de diccionarios OCR (base + personalizado)
+- Añadido: API REST completa para diccionarios
+- Añadido: Tab "Diccionario" en Dashboard
+- Añadido: Patron regex para correccion de precios
+- Añadido: 60+ correcciones para espanol (ciudades, terminos fiscales, etc.)
+- Corregido: Errores de sintaxis en f-strings de Python
+- Corregido: Auto-recuperacion mejorada para std::exception
+
+### v3.0.0 (2025-12-06)
+- Añadido: Modo Layout experimental con coordenadas de bounding boxes
+- Añadido: Reconstruccion espacial de texto
+- Mejorado: Serialización JSON de numpy arrays

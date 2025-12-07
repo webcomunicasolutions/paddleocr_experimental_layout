@@ -16,6 +16,9 @@ services:
       - paddlex-models:/home/n8n/.paddlex
       - paddleocr-models:/home/n8n/.paddleocr
 
+      # Diccionarios OCR (personalizaciones persistentes)
+      - ocr-dictionaries:/app/dictionaries
+
       # OPCIONAL: Si quieres datos adicionales en /app/data
       # - /home/n8n/paddleocr-final/data/:/app/data/
     shm_size: 8g
@@ -83,4 +86,6 @@ volumes:
   paddlex-models:
     driver: local
   paddleocr-models:
+    driver: local
+  ocr-dictionaries:
     driver: local
