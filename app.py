@@ -5100,6 +5100,64 @@ pp_table_pipeline = None
 pp_layout_pipeline = None
 pp_structure_initialized = False
 
+# Circuit Breaker para PP-Structure
+# Evita llamadas repetidas cuando el servicio está fallando
+pp_structure_circuit_breaker = {
+    'failures': 0,           # Contador de fallos consecutivos
+    'last_failure': 0,       # Timestamp del último fallo
+    'state': 'closed',       # closed (OK), open (bloqueado), half-open (probando)
+    'threshold': 3,          # Fallos antes de abrir el circuito
+    'reset_timeout': 60,     # Segundos antes de intentar de nuevo
+}
+
+def check_circuit_breaker():
+    """
+    Verifica si el circuit breaker permite llamadas a PP-Structure.
+    Returns: True si se puede llamar, False si está bloqueado
+    """
+    global pp_structure_circuit_breaker
+    cb = pp_structure_circuit_breaker
+
+    if cb['state'] == 'closed':
+        return True
+
+    if cb['state'] == 'open':
+        # Verificar si ya pasó el timeout para intentar de nuevo
+        import time
+        if time.time() - cb['last_failure'] > cb['reset_timeout']:
+            cb['state'] = 'half-open'
+            logger.info("[CIRCUIT-BREAKER] Estado: half-open, probando PP-Structure...")
+            return True
+        return False
+
+    if cb['state'] == 'half-open':
+        return True
+
+    return False
+
+def record_circuit_success():
+    """Registra un éxito, resetea el circuit breaker"""
+    global pp_structure_circuit_breaker
+    pp_structure_circuit_breaker['failures'] = 0
+    pp_structure_circuit_breaker['state'] = 'closed'
+
+def record_circuit_failure():
+    """Registra un fallo, puede abrir el circuit breaker"""
+    global pp_structure_circuit_breaker
+    import time
+    cb = pp_structure_circuit_breaker
+
+    cb['failures'] += 1
+    cb['last_failure'] = time.time()
+
+    if cb['state'] == 'half-open':
+        # Si falla en half-open, volver a abrir
+        cb['state'] = 'open'
+        logger.warning("[CIRCUIT-BREAKER] Fallo en half-open, circuito ABIERTO")
+    elif cb['failures'] >= cb['threshold']:
+        cb['state'] = 'open'
+        logger.warning(f"[CIRCUIT-BREAKER] {cb['failures']} fallos consecutivos, circuito ABIERTO")
+
 def init_pp_structure_pipelines(force_reinit=False):
     """
     Inicializa los pipelines de PP-Structure bajo demanda.
@@ -5141,23 +5199,45 @@ def init_pp_structure_pipelines(force_reinit=False):
         return False
 
 
-def run_pp_structure_with_retry(pipeline, file_path, max_retries=2):
+def run_pp_structure_with_retry(pipeline, file_path, max_retries=2, timeout_seconds=120):
     """
     Ejecuta un pipeline de PP-Structure con manejo de errores std::exception.
 
-    Si falla con std::exception, reintenta reinicializando el pipeline.
+    Incluye:
+    - Circuit breaker para evitar llamadas cuando el servicio falla repetidamente
+    - Reintentos con reinicialización de pipelines
+    - Timeout configurable
 
     Args:
         pipeline: El pipeline a ejecutar ('table' o 'layout')
         file_path: Ruta al archivo a procesar
         max_retries: Número máximo de reintentos
+        timeout_seconds: Timeout máximo en segundos
 
     Returns:
         Lista de resultados o None si falla
     """
     global pp_table_pipeline, pp_layout_pipeline
+    import threading
+    import os
 
-    for attempt in range(max_retries + 1):
+    # Verificar circuit breaker primero
+    if not check_circuit_breaker():
+        logger.warning("[PP-STRUCTURE] Circuit breaker ABIERTO, saltando PP-Structure")
+        return None
+
+    # Calcular timeout dinámico basado en tamaño del archivo
+    try:
+        file_size = os.path.getsize(file_path)
+        # Base: 60s + 30s por cada 500KB
+        dynamic_timeout = min(60 + (file_size // 500000) * 30, timeout_seconds)
+        logger.info(f"[PP-STRUCTURE] Archivo: {file_size/1024:.1f}KB, timeout: {dynamic_timeout}s")
+    except:
+        dynamic_timeout = timeout_seconds
+
+    result_container = {'result': None, 'error': None}
+
+    def run_pipeline():
         try:
             if pipeline == 'table':
                 pp = pp_table_pipeline
@@ -5167,14 +5247,34 @@ def run_pp_structure_with_retry(pipeline, file_path, max_retries=2):
             if pp is None:
                 logger.warning(f"[PP-STRUCTURE] Pipeline {pipeline} no inicializado, inicializando...")
                 if not init_pp_structure_pipelines(force_reinit=True):
-                    return None
+                    result_container['error'] = "No se pudo inicializar"
+                    return
                 pp = pp_table_pipeline if pipeline == 'table' else pp_layout_pipeline
 
-            results = list(pp.predict(file_path))
-            return results
-
+            result_container['result'] = list(pp.predict(file_path))
         except Exception as e:
-            error_str = str(e)
+            result_container['error'] = str(e)
+
+    for attempt in range(max_retries + 1):
+        result_container = {'result': None, 'error': None}
+
+        # Ejecutar en thread con timeout
+        thread = threading.Thread(target=run_pipeline)
+        thread.start()
+        thread.join(timeout=dynamic_timeout)
+
+        if thread.is_alive():
+            logger.error(f"[PP-STRUCTURE] Timeout después de {dynamic_timeout}s")
+            record_circuit_failure()
+            # No podemos matar el thread, pero al menos no esperamos más
+            return None
+
+        if result_container['result'] is not None:
+            record_circuit_success()
+            return result_container['result']
+
+        if result_container['error']:
+            error_str = result_container['error']
 
             # Detectar errores de tipo std::exception u otros errores de C++
             is_cpp_error = 'std::exception' in error_str or 'Segmentation' in error_str
@@ -5189,11 +5289,14 @@ def run_pp_structure_with_retry(pipeline, file_path, max_retries=2):
                     continue
                 else:
                     logger.error("[PP-STRUCTURE] No se pudieron reinicializar los pipelines")
+                    record_circuit_failure()
                     return None
             else:
                 logger.error(f"[PP-STRUCTURE] Error fatal (intento {attempt + 1}): {error_str}")
+                record_circuit_failure()
                 return None
 
+    record_circuit_failure()
     return None
 
 
