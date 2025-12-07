@@ -4,129 +4,93 @@
 
 ## Estado Actual del Proyecto
 
-### Versión: 4.0 (Inteligencia Documental Completa)
-### Próximo objetivo: Mejoras continuas según feedback
+### Versión: 4.1 (Optimización de Rendimiento)
+### Próximo objetivo: v4.2 (LINE_ITEMS Avanzado)
 
-**ÚLTIMA ACTUALIZACIÓN:** 2025-12-07 - v4.0 completada con todas las fases del roadmap.
-
----
-
-## PROGRESO COMPLETADO (v4.0)
-
-### Fase 1: PP-Structure Instalado ✅
-- `paddlex[ocr]==3.3.10` instalado
-- `scikit-learn` instalado (para clustering DBSCAN)
-- Pipelines funcionando: `table_recognition`, `layout_parsing`
-
-### Fase 2-3: Endpoints Creados ✅
-
-**`/structure`** - Análisis estructural de documentos
-- Detecta regiones (tablas, texto, imágenes, charts)
-- Extrae tablas como HTML usando SLANet
-- Proporciona coordenadas de cada región
-
-**`/extract`** - Extracción inteligente de campos
-- Detecta tipo de documento (invoice, receipt, etc.)
-- Extrae campos: vendor, NIF, invoice_number, date, total, tax_base, tax_rate, tax_amount
-- NUEVO: customer_name, customer_nif, line_items
-- Calcula confidence score
-
-### Fase 4: DBSCAN Clustering ✅ (NUEVO)
-- `detect_columns_dbscan()` implementado
-- Detección inteligente de columnas en documentos
-- `format_text_with_layout()` mejorado con clustering
-
-### Fase 5: KIE Mejorado ✅
-- Patrones regex para IVA mejorados (5 estrategias)
-- Extracción correcta de: tax_base, tax_rate, tax_amount
-- NUEVO: LINE_ITEMS - conceptos/productos de factura
-- NUEVO: CUSTOMER_NAME, CUSTOMER_NIF
-- Corrección OCR para NIFs (R→B, I→1, O→0)
-
-### Fase 6: Detección Híbrida ✅
-- PDFs vectoriales → `pdftotext -layout` (preserva estructura)
-- PDFs escaneados/imágenes → OCR con PaddleOCR
-- Selección automática del mejor método
-- Campo `extraction_method` en respuesta
+**ÚLTIMA ACTUALIZACIÓN:** 2025-12-07 - v4.1 completada con circuit breaker y timeout inteligente.
 
 ---
 
-## RESULTADOS DE PRUEBAS v4.0
+## VERSIONES COMPLETADAS
 
-### ticket.pdf (ESCANEADO) - extraction_method: ocr ✅
-```json
-{"vendor": "E.S.CUATRO OLIVOS S.L.", "vendor_nif": "B11368479",
- "invoice_number": "2025003047",
- "total": 66.83, "tax_base": 55.23, "tax_rate": 21.0, "tax_amount": 11.6,
- "confidence": 1.0}
-```
+### v4.0 - Inteligencia Documental ✅
+- OCR con PaddleOCR + diccionario 407 correcciones
+- Modo layout con DBSCAN clustering para columnas
+- Detección híbrida (pdftotext para vectoriales, OCR para escaneados)
+- PP-Structure (tablas HTML con SLANet, layout analysis)
+- KIE: vendor, NIF, total, tax_base, tax_rate, tax_amount
+- customer_name, customer_nif, invoice_number, line_items básico
 
-### Factura noviembre.pdf (OLIVENET) - extraction_method: pdftotext_layout ✅
-```json
-{"vendor": "OLIVENET NETWORK S.L.U.", "vendor_nif": "B93340198",
- "invoice_number": "ON2025-584267",
- "customer_name": "Juan Jose Sanchez Bernal", "customer_nif": "78971220F",
- "total": 94.74, "tax_base": 78.3, "tax_rate": 21.0, "tax_amount": 16.44,
- "line_items": 7, "confidence": 0.9}
-```
-
-### Factura_VFR25087570.pdf (VODAFONE/DMI) - extraction_method: pdftotext_layout ✅
-```json
-{"vendor": "DMI Computer S.A.", "vendor_nif": "A79522702",
- "invoice_number": "VFR25087570",
- "customer_nif": "78971220F",
- "total": 172.12, "tax_base": 142.25, "tax_rate": 21.0, "tax_amount": 29.87,
- "line_items": 5, "confidence": 1.0}
-```
+### v4.1 - Optimización de Rendimiento ✅
+- **Circuit Breaker** para PP-Structure
+  - 3 fallos consecutivos → bloquea llamadas
+  - 60 segundos de reset timeout
+  - Estados: closed, open, half-open
+- **Timeout inteligente**
+  - Base: 60s + 30s por cada 500KB
+  - Máximo: 120s
+  - Ejecución en thread separado
+- **Fallback automático** a OCR básico si PP-Structure falla
 
 ---
 
-## Ubicaciones Clave en app.py (~5900 líneas)
+## PRÓXIMO: v4.2 - LINE_ITEMS Avanzado
+
+### Objetivo
+Extraer conceptos/productos completos para reproducir facturas:
+- Descripción del producto/servicio
+- Cantidad
+- Precio unitario
+- Importe (cantidad × precio)
+- IVA aplicado por línea (si aplica)
+
+### Plan de implementación
+1. Detectar cabeceras de tabla (Concepto, Cantidad, Precio, Importe)
+2. Mapear columnas automáticamente usando coordenadas X
+3. Extraer cada línea con todos sus campos
+4. Validar coherencia (cantidad × precio = importe)
+
+---
+
+## ENDPOINTS DISPONIBLES
+
+| Endpoint | Descripción | Uso principal |
+|----------|-------------|---------------|
+| `/process` | OCR con formato | `format=layout` para IA |
+| `/extract` | Extracción KIE | JSON estructurado |
+| `/structure` | PP-Structure | Tablas HTML + layout |
+| `/ocr` | Original Paco | Compatibilidad n8n |
+
+---
+
+## UBICACIONES CLAVE EN app.py (~6000 líneas)
 
 | Función | Línea (aprox) | Descripción |
 |---------|---------------|-------------|
-| `detect_columns_dbscan()` | ~2417 | NUEVO - Clustering de columnas |
-| `format_text_with_layout()` | ~2450 | Reconstrucción espacial mejorada |
-| `/process` endpoint | ~2750 | Endpoint principal |
-| `/ocr` endpoint | 1913 | Original de Paco (NO TOCAR) |
-| `OCR_CORRECTIONS_BASE` | 2084 | Diccionario OCR (407 correcciones) |
-| `init_pp_structure_pipelines()` | ~4983 | Inicializa PP-Structure |
-| `/structure` endpoint | ~5012 | Análisis estructural |
-| `extract_invoice_fields()` | ~5545 | KIE - extracción de campos |
-| `/extract` endpoint | ~5400 | Extracción inteligente |
+| `pp_structure_circuit_breaker` | ~5103 | Circuit breaker config |
+| `check_circuit_breaker()` | ~5113 | Verificar estado CB |
+| `record_circuit_success/failure()` | ~5138 | Registrar éxito/fallo |
+| `run_pp_structure_with_retry()` | ~5202 | Ejecutar con retry+timeout |
+| `detect_columns_dbscan()` | ~2417 | Clustering de columnas |
+| `format_text_with_layout()` | ~2450 | Reconstrucción espacial |
+| `extract_invoice_fields()` | ~5600 | KIE - extracción campos |
 
 ---
 
-## Fases del Roadmap - TODAS COMPLETADAS
-
-| Fase | Descripción | Estado |
-|------|-------------|--------|
-| 1 | Instalar dependencias PP-Structure | ✅ COMPLETADO |
-| 2 | Layout Analysis Pipeline | ✅ COMPLETADO |
-| 3 | Table Recognition (SLANet) | ✅ COMPLETADO |
-| 4 | Mejorar format_text_with_layout (DBSCAN) | ✅ COMPLETADO |
-| 5 | Key Information Extraction | ✅ COMPLETADO |
-| 6 | Endpoint /extract estructurado | ✅ COMPLETADO |
-
----
-
-## Comandos de Test Rápido
+## COMANDOS DE TEST
 
 ```bash
 # Health check
 curl http://localhost:8503/health
 
-# Test /extract (extracción de campos con KIE)
-curl -X POST http://localhost:8503/extract -F "file=@ticket.pdf"
+# Test /extract
+curl -X POST http://localhost:8503/extract -F "file=@factura.pdf"
 
-# Test /structure (análisis estructural con HTML de tablas)
-curl -X POST http://localhost:8503/structure -F "file=@factura.pdf"
-
-# Test /process layout (OCR perfecto para IA)
+# Test /process layout
 curl -X POST http://localhost:8503/process -F "file=@factura.pdf" -F "format=layout"
 
-# Ver logs
-docker logs --tail 50 paddlepaddle-cpu
+# Ver logs (circuit breaker, timeouts)
+docker logs --tail 100 paddlepaddle-cpu | grep -E "CIRCUIT|PP-STRUCTURE|timeout"
 
 # Rebuild completo
 docker-compose down && docker-compose build --no-cache && docker-compose up -d
@@ -134,43 +98,67 @@ docker-compose down && docker-compose build --no-cache && docker-compose up -d
 
 ---
 
-## Dependencias en Dockerfile
+## ARCHIVOS DE DOCUMENTACIÓN
 
-```dockerfile
-pip install "paddlex[ocr]==3.3.10" scikit-learn
+| Archivo | Contenido |
+|---------|-----------|
+| `ROADMAP_v4.1.md` | Plan de mejoras v4.1, v4.2, v4.3 |
+| `CHANGELOG_DETAILED.md` | Historial de cambios detallado |
+| `CLAUDE.md` | Instrucciones para Claude Code |
+| `.claude/SESSION_CONTEXT.md` | ESTE ARCHIVO - contexto rápido |
+
+---
+
+## CIRCUIT BREAKER - CONFIGURACIÓN
+
+```python
+pp_structure_circuit_breaker = {
+    'failures': 0,           # Contador de fallos
+    'last_failure': 0,       # Timestamp último fallo
+    'state': 'closed',       # closed/open/half-open
+    'threshold': 3,          # Fallos para abrir
+    'reset_timeout': 60,     # Segundos para reintentar
+}
+```
+
+### Estados:
+- **closed**: Normal, PP-Structure disponible
+- **open**: Bloqueado, no se llama a PP-Structure
+- **half-open**: Probando si PP-Structure funciona de nuevo
+
+---
+
+## TIMEOUT INTELIGENTE
+
+```python
+# Fórmula:
+timeout = min(60 + (file_size // 500000) * 30, 120)
+
+# Ejemplos:
+# 100KB  → 60s
+# 600KB  → 90s
+# 1.2MB  → 120s (máximo)
 ```
 
 ---
 
-## NOTAS IMPORTANTES
+## FACTURAS DE PRUEBA
 
-1. **NO MODIFICAR** el endpoint `/ocr` (compatibilidad n8n)
-2. **El valor real** está en el modo `layout` para pasar a una IA
-3. **KIE es un bonus** - los regex nunca cubrirán todos los formatos
-4. **Para OCR perfecto**: usar `/process` con `format=layout`
-5. **Para extracción estructurada**: usar `/extract` (best-effort)
+```
+/mnt/c/PROYECTOS CLAUDE/paddleocr/facturas_prueba/
+├── ticket.pdf                # Escaneado, gasolinera ✅
+├── Factura noviembre.pdf     # Vectorial, Olivenet ✅
+├── Factura_VFR25087570.pdf   # Vectorial, Vodafone ✅
+└── CamScanner*.pdf           # Escaneado grande
+```
 
 ---
 
-## Arquitectura Final
+## SI SE CORTA LA COMUNICACIÓN
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    ENTRADA: PDF/Imagen                          │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Detección Híbrida                                              │
-│  - PDF vectorial → pdftotext -layout                            │
-│  - PDF escaneado → PaddleOCR + DBSCAN clustering                │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┴───────────────┐
-              ▼                               ▼
-┌─────────────────────────┐     ┌─────────────────────────┐
-│  /process (layout)      │     │  /extract (KIE)         │
-│  → Texto estructurado   │     │  → JSON con campos      │
-│  → Para pasar a IA      │     │  → Best-effort regex    │
-└─────────────────────────┘     └─────────────────────────┘
-```
+1. Leer este archivo primero
+2. Ver `ROADMAP_v4.1.md` para próximos pasos
+3. Estado actual: **v4.1 completada, listo para v4.2**
+4. Siguiente tarea: **LINE_ITEMS avanzado**
+   - Extraer cantidad, precio unitario, importe por línea
+   - Detectar estructura tabular de items
