@@ -2411,20 +2411,86 @@ def apply_ocr_corrections(text):
 # ============================================================================
 # Esta función usa las coordenadas X,Y de cada bloque de texto detectado
 # para reconstruir la estructura visual del documento, similar a LLMWhisperer.
+# MEJORADO v4.0: Usa DBSCAN para detectar columnas automáticamente.
 # ============================================================================
 
-def format_text_with_layout(text_blocks, coordinates, page_width=200):
+def detect_columns_dbscan(x_positions, eps_factor=0.05):
+    """
+    Detecta columnas usando DBSCAN clustering en las posiciones X.
+
+    Args:
+        x_positions: Lista de coordenadas X (x_min de cada bloque)
+        eps_factor: Factor para calcular eps relativo al ancho del documento
+
+    Returns:
+        Lista de tuplas (x_inicio, x_fin) para cada columna detectada
+    """
+    if not x_positions or len(x_positions) < 2:
+        return [(0, 1000)]  # Una sola columna por defecto
+
+    try:
+        from sklearn.cluster import DBSCAN
+        import numpy as np
+
+        # Preparar datos para DBSCAN
+        X = np.array(x_positions).reshape(-1, 1)
+
+        # Calcular eps basado en el rango de X
+        x_range = max(x_positions) - min(x_positions)
+        eps = max(x_range * eps_factor, 20)  # Mínimo 20px
+
+        # Aplicar DBSCAN
+        clustering = DBSCAN(eps=eps, min_samples=2).fit(X)
+        labels = clustering.labels_
+
+        # Agrupar posiciones por cluster
+        columns = {}
+        for i, label in enumerate(labels):
+            if label == -1:  # Ruido - asignar al cluster más cercano
+                continue
+            if label not in columns:
+                columns[label] = []
+            columns[label].append(x_positions[i])
+
+        # Si no hay clusters válidos, retornar una columna
+        if not columns:
+            return [(min(x_positions), max(x_positions))]
+
+        # Calcular rangos de cada columna
+        column_ranges = []
+        for label, positions in columns.items():
+            x_start = min(positions)
+            x_end = max(positions) + 100  # Añadir margen para el texto
+            column_ranges.append((x_start, x_end))
+
+        # Ordenar columnas de izquierda a derecha
+        column_ranges.sort(key=lambda c: c[0])
+
+        logger.info(f"[LAYOUT-DBSCAN] Detectadas {len(column_ranges)} columnas: {column_ranges}")
+
+        return column_ranges
+
+    except ImportError:
+        logger.warning("[LAYOUT-DBSCAN] scikit-learn no disponible, usando método simple")
+        return [(min(x_positions), max(x_positions))]
+    except Exception as e:
+        logger.warning(f"[LAYOUT-DBSCAN] Error: {e}, usando método simple")
+        return [(min(x_positions), max(x_positions))]
+
+
+def format_text_with_layout(text_blocks, coordinates, page_width=200, use_dbscan=True):
     """
     Reconstruye la estructura espacial del documento usando coordenadas.
-    MEJORADO: Preserva columnas y estructura de facturas/tickets.
+    MEJORADO v4.0: Usa DBSCAN para detectar columnas automáticamente.
 
     Args:
         text_blocks: Lista de textos detectados
         coordinates: Lista de polígonos/bboxes [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
         page_width: Ancho de caracteres para la salida (default 200 para facturas)
+        use_dbscan: Si True, usa DBSCAN para detectar columnas (default True)
 
     Returns:
-        Texto formateado manteniendo la estructura espacial
+        Texto formateado manteniendo la estructura espacial con columnas detectadas
     """
     if not text_blocks or not coordinates:
         return '\n'.join(text_blocks) if text_blocks else ''
@@ -2511,6 +2577,26 @@ def format_text_with_layout(text_blocks, coordinates, page_width=200):
 
     logger.info(f"[LAYOUT] Documento: ancho={doc_width:.1f}px, offset_x={x_offset:.1f}px")
 
+    # =========================================================================
+    # DBSCAN: Detectar columnas automáticamente
+    # =========================================================================
+    columns = []
+    if use_dbscan:
+        x_positions = [b['x_min'] for b in blocks]
+        columns = detect_columns_dbscan(x_positions)
+        logger.info(f"[LAYOUT] DBSCAN detectó {len(columns)} columnas")
+
+    # Función para asignar bloque a columna
+    def get_column_index(x_min):
+        if not columns:
+            return 0
+        for i, (col_start, col_end) in enumerate(columns):
+            if col_start - 50 <= x_min <= col_end + 50:  # Margen de tolerancia
+                return i
+        # Si no encaja, asignar a la columna más cercana
+        distances = [(i, abs(x_min - (c[0] + c[1])/2)) for i, c in enumerate(columns)]
+        return min(distances, key=lambda x: x[1])[0]
+
     # Ordenar por Y primero
     blocks_sorted = sorted(blocks, key=lambda b: b['y_center'])
 
@@ -2540,43 +2626,77 @@ def format_text_with_layout(text_blocks, coordinates, page_width=200):
 
     logger.info(f"[LAYOUT] Ancho promedio por caracter: {char_width_px:.1f}px")
 
-    # Construir salida con espaciado basado en gaps reales
+    # =========================================================================
+    # Construir salida con columnas detectadas por DBSCAN
+    # =========================================================================
     output_lines = []
+
+    # Calcular ancho de cada columna en caracteres
+    num_columns = len(columns) if columns else 1
+    col_char_width = page_width // num_columns if num_columns > 0 else page_width
 
     for row in rows:
         # Ordenar bloques de la fila por X (izquierda a derecha)
         row_sorted = sorted(row, key=lambda b: b['x_min'])
 
-        # Construir línea calculando gaps entre bloques
-        line_parts = []
-        prev_block_end = None
+        if use_dbscan and len(columns) > 1:
+            # Modo DBSCAN: Posicionar bloques en sus columnas correspondientes
+            line = [' '] * page_width
 
-        for block in row_sorted:
-            if prev_block_end is not None:
-                # Calcular gap entre el bloque anterior y este
-                gap_px = block['x_min'] - prev_block_end
+            for block in row_sorted:
+                col_idx = get_column_index(block['x_min'])
 
-                # Convertir gap a espacios (basado en ancho de caracter estimado)
-                if gap_px > char_width_px * 8:
-                    # Gap grande = separador de columna (TAB visual)
-                    spaces = '    '  # 4 espacios para columnas
-                elif gap_px > char_width_px * 3:
-                    # Gap medio
-                    spaces = '   '
-                elif gap_px > char_width_px * 1.5:
-                    # Gap pequeño
-                    spaces = '  '
-                elif gap_px > char_width_px * 0.5:
-                    spaces = ' '
-                else:
-                    spaces = ''
+                # Calcular posición dentro de la columna
+                if col_idx < len(columns):
+                    col_start_px, col_end_px = columns[col_idx]
+                    col_width_px = col_end_px - col_start_px
 
-                line_parts.append(spaces)
+                    # Posición relativa dentro de la columna
+                    rel_pos = (block['x_min'] - col_start_px) / col_width_px if col_width_px > 0 else 0
+                    rel_pos = max(0, min(1, rel_pos))
 
-            line_parts.append(block['text'])
-            prev_block_end = block['x_max']
+                    # Posición en caracteres
+                    char_start = int(col_idx * col_char_width + rel_pos * col_char_width * 0.8)
+                    char_start = min(char_start, page_width - len(block['text']) - 1)
+                    char_start = max(0, char_start)
 
-        output_lines.append(''.join(line_parts).strip())
+                    # Insertar texto
+                    text = block['text']
+                    for i, char in enumerate(text):
+                        pos = char_start + i
+                        if pos < page_width:
+                            line[pos] = char
+
+            output_lines.append(''.join(line).rstrip())
+
+        else:
+            # Modo simple: gaps entre bloques
+            line_parts = []
+            prev_block_end = None
+
+            for block in row_sorted:
+                if prev_block_end is not None:
+                    # Calcular gap entre el bloque anterior y este
+                    gap_px = block['x_min'] - prev_block_end
+
+                    # Convertir gap a espacios (basado en ancho de caracter estimado)
+                    if gap_px > char_width_px * 8:
+                        spaces = '    '  # 4 espacios para columnas
+                    elif gap_px > char_width_px * 3:
+                        spaces = '   '
+                    elif gap_px > char_width_px * 1.5:
+                        spaces = '  '
+                    elif gap_px > char_width_px * 0.5:
+                        spaces = ' '
+                    else:
+                        spaces = ''
+
+                    line_parts.append(spaces)
+
+                line_parts.append(block['text'])
+                prev_block_end = block['x_max']
+
+            output_lines.append(''.join(line_parts).strip())
 
     return '\n'.join(output_lines)
 
@@ -5425,19 +5545,23 @@ def extract():
 def extract_invoice_fields(text):
     """
     Extrae campos clave de una factura/ticket usando regex y heurísticas.
+    MEJORADO v4.0: Incluye LINE_ITEMS, CUSTOMER_NAME, CUSTOMER_NIF
     """
     import re
 
     fields = {
         'vendor': None,
         'vendor_nif': None,
+        'customer_name': None,
+        'customer_nif': None,
         'invoice_number': None,
         'date': None,
         'total': None,
         'tax_base': None,
         'tax_rate': None,
         'tax_amount': None,
-        'payment_method': None
+        'payment_method': None,
+        'line_items': []  # Lista de conceptos/productos
     }
 
     if not text:
@@ -5461,17 +5585,66 @@ def extract_invoice_fields(text):
             fields['vendor_nif'] = nif
             break
 
-    # Número de factura
-    invoice_patterns = [
-        r'(?:N[°º]?\s*(?:FACTURA|FACT\.?)|FACTURA\s*N[°º]?)[:\s]*([A-Z0-9\-/]+)',
-        r'(?:INVOICE|INV)[:\s#]*([A-Z0-9\-/]+)',
-        r'N[°º]?\s*FACTURA[:\s]*(\d+)',
+    # Número de factura - Mejorado para múltiples formatos
+    # Estrategia 1: Buscar patrones específicos de proveedores conocidos PRIMERO
+    # (Estos son más confiables que los patrones genéricos)
+    specific_patterns = [
+        # Vodafone/DMI: VFR seguido de 8 dígitos
+        r'\b(VFR\d{8})\b',
+        # Pedidos: VP seguido de 8 dígitos
+        r'\b(VP\d{8})\b',
+        # Olivenet: ON2025-584267 (prefijo+año+guión+secuencial)
+        r'\b(ON\d{4}-\d+)\b',
+        # Formato año+secuencial: 2025003047
+        r'\b(20\d{2}\d{6,})\b',
+        # Genérico: FAC, INV seguido de números (con límite de palabra)
+        r'\b((?:FAC|INV)\d{6,})\b',
     ]
-    for pattern in invoice_patterns:
+    for pattern in specific_patterns:
         match = re.search(pattern, text_upper)
         if match:
-            fields['invoice_number'] = match.group(1).strip()
+            fields['invoice_number'] = match.group(1)
             break
+
+    # Estrategia 2: Patrones inline con etiquetas explícitas
+    if not fields.get('invoice_number'):
+        invoice_patterns_inline = [
+            # Nº de factura: ON2025-584267 (con 'de' opcional, acepta guiones)
+            r'N[°º]?\s*(?:DE\s+)?FACTURA[:\s]+([A-Z0-9\-]+)',
+            # Nº Factura: 12345678 o FACTURA Nº: 12345678
+            r'(?:FACTURA\s*N[°º]?)[:\s]+([A-Z]{0,3}\d{6,}[A-Z0-9]*)',
+            # INVOICE: INV12345
+            r'\bINVOICE[:\s#]+([A-Z0-9\-/]+)',
+            # REF. FACTURA: (con límite de palabra para evitar 'reflejados')
+            r'\bREF\.?\s*(?:FACTURA)?[:\s]+([A-Z0-9\-/]+)',
+        ]
+        for pattern in invoice_patterns_inline:
+            match = re.search(pattern, text_upper)
+            if match:
+                invoice_num = match.group(1).strip()
+                # Validar que parece un número de factura (mínimo 4 caracteres, debe tener dígitos)
+                if len(invoice_num) >= 4 and any(c.isdigit() for c in invoice_num):
+                    fields['invoice_number'] = invoice_num
+                    break
+
+    # Estrategia 3: Formato multilínea (etiqueta en una línea, valor en la siguiente)
+    # Común en facturas Vodafone/DMI: "Nº Factura\nVFR25087570"
+    if not fields.get('invoice_number'):
+        for i, line in enumerate(lines):
+            line_upper = line.upper().strip()
+            # Buscar líneas que contienen "Nº Factura" al inicio
+            if re.match(r'^N[°º]?\s*FACTURA', line_upper):
+                # Buscar en las siguientes 3 líneas un código alfanumérico
+                for j in range(1, 4):
+                    if i + j < len(lines):
+                        next_line = lines[i + j].strip()
+                        # Buscar código tipo VFR25087570, 2025003047, etc.
+                        code_match = re.match(r'^([A-Z]{0,4}\d{6,}[A-Z0-9]*)$', next_line.upper())
+                        if code_match:
+                            fields['invoice_number'] = code_match.group(1)
+                            break
+                if fields.get('invoice_number'):
+                    break
 
     # Fecha
     date_patterns = [
@@ -5685,6 +5858,116 @@ def extract_invoice_fields(text):
                 break
             elif not fields['vendor'] and len(line) > 10:
                 fields['vendor'] = line
+
+    # =========================================================================
+    # CUSTOMER: Extraer nombre y NIF del cliente
+    # =========================================================================
+    # Buscar sección de cliente (después de "Cliente", "Datos del cliente", etc.)
+    customer_section_start = -1
+    for i, line in enumerate(lines):
+        line_upper = line.upper().strip()
+        if any(x in line_upper for x in ['CLIENTE', 'DATOS CLIENTE', 'NOMBRE:', 'REF. CLIENTE']):
+            customer_section_start = i
+            break
+
+    if customer_section_start >= 0:
+        # Buscar nombre del cliente (línea después de "Nombre:" o primera línea con contenido)
+        for i in range(customer_section_start, min(customer_section_start + 10, len(lines))):
+            line = lines[i].strip()
+            line_upper = line.upper()
+
+            # Buscar "Nombre: Juan Jose..."
+            name_match = re.search(r'NOMBRE[:\s]*(.+)', line_upper)
+            if name_match:
+                fields['customer_name'] = name_match.group(1).strip().title()
+                continue
+
+            # Buscar NIF del cliente (diferente al del vendor)
+            if 'N.I.F' in line_upper or 'NIF' in line_upper:
+                nif_match = re.search(r'N\.?I\.?F\.?[:\s]*(\d{8}[A-Z])', line_upper)
+                if nif_match:
+                    customer_nif = nif_match.group(1)
+                    # Verificar que no sea el mismo que el vendor
+                    if customer_nif != fields.get('vendor_nif'):
+                        fields['customer_nif'] = customer_nif
+
+    # Buscar segundo NIF en el documento (probablemente el cliente)
+    if not fields.get('customer_nif'):
+        all_nifs = re.findall(r'N\.?I\.?F\.?[:\s]*(\d{8}[A-Z]|\d{8}[A-Z]|[A-Z]\d{8})', text_upper)
+        for nif in all_nifs:
+            nif_clean = nif.replace('I', '1').replace('O', '0')
+            if nif_clean != fields.get('vendor_nif') and not fields.get('customer_nif'):
+                fields['customer_nif'] = nif_clean
+
+    # =========================================================================
+    # LINE_ITEMS: Extraer conceptos/productos de la factura
+    # =========================================================================
+    line_items = []
+
+    # Patrones para detectar líneas de concepto/producto
+    # Formato típico: "Concepto                                    Cantidad    Precio    Importe"
+    # O: "Producto X    2    15.00    30.00"
+
+    # Buscar líneas que contengan un importe al final (patrón de item)
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+
+        # Ignorar líneas de totales, IVA, etc.
+        line_upper = line_stripped.upper()
+        skip_keywords = ['TOTAL', 'BASE IMPONIBLE', 'IVA', 'CUOTA', 'SUBTOTAL', 'NIF', 'CIF',
+                        'FACTURA', 'FECHA', 'CLIENTE', 'DOMICILIO', 'POBLACIÓN', 'PROVINCIA',
+                        'FORMA DE PAGO', 'CUENTA', 'CONFORME', 'ESCANEADO', 'DERECHOS']
+        if any(kw in line_upper for kw in skip_keywords):
+            continue
+
+        # Buscar patrón: texto + número(s) al final
+        # Ejemplo: "Fibra Pro (01/10/2025 - 31/10/2025)    24.7934 €"
+        item_match = re.search(r'^(.+?)\s+(\d+[.,]\d{2,4})\s*€?$', line_stripped)
+        if item_match:
+            description = item_match.group(1).strip()
+            amount_str = item_match.group(2).replace(',', '.')
+
+            # Filtrar descripciones muy cortas o que sean solo números
+            if len(description) > 3 and not description.replace('.', '').replace(',', '').isdigit():
+                try:
+                    amount = float(amount_str)
+                    # Solo añadir si el importe es razonable (no es el total ni la base)
+                    if amount != fields.get('total') and amount != fields.get('tax_base'):
+                        line_items.append({
+                            'description': description,
+                            'amount': amount
+                        })
+                except:
+                    pass
+
+        # Buscar patrón con cantidad: "Producto    2    15.00    30.00"
+        multi_num_match = re.search(r'^(.+?)\s+(\d+)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})\s*€?$', line_stripped)
+        if multi_num_match:
+            description = multi_num_match.group(1).strip()
+            quantity = int(multi_num_match.group(2))
+            unit_price = float(multi_num_match.group(3).replace(',', '.'))
+            total_price = float(multi_num_match.group(4).replace(',', '.'))
+
+            if len(description) > 3:
+                line_items.append({
+                    'description': description,
+                    'quantity': quantity,
+                    'unit_price': unit_price,
+                    'amount': total_price
+                })
+
+    # Eliminar duplicados manteniendo orden
+    seen = set()
+    unique_items = []
+    for item in line_items:
+        key = (item['description'], item.get('amount'))
+        if key not in seen:
+            seen.add(key)
+            unique_items.append(item)
+
+    fields['line_items'] = unique_items[:20]  # Limitar a 20 items máximo
 
     return fields
 
