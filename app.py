@@ -3244,7 +3244,7 @@ Body Parameters:
             </p>
         </div>
 
-        <p style="text-align:center; color:#999; margin-top:30px;"><strong>PaddleOCR Fusion v3.0.0</strong></p>
+        <p style="text-align:center; color:#999; margin-top:30px;"><strong>PaddleOCR Fusion v4.0.0</strong> - Inteligencia Documental</p>
     </div>
 
     <script>
@@ -3851,7 +3851,7 @@ def stats():
             'opencv_config': OPENCV_CONFIG,
             'rotation_config': ROTATION_CONFIG
         },
-        'version': '3.0.0-fusion',
+        'version': '4.0.0-fusion',
         'base_project': 'paddlepaddle_paco',
         'api_layer': 'webcomunica'
     })
