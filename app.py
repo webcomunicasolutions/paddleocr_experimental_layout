@@ -6003,74 +6003,177 @@ def extract_invoice_fields(text):
                 fields['customer_nif'] = nif_clean
 
     # =========================================================================
-    # LINE_ITEMS: Extraer conceptos/productos de la factura
+    # LINE_ITEMS v4.2: Extraer conceptos/productos de la factura
+    # Soporta múltiples formatos:
+    # - Olivenet: Concepto + Importe
+    # - Vodafone/DMI: Código + Descripción + Cantidad + Precio + Importe
+    # - Tickets: Producto + Importe
     # =========================================================================
     line_items = []
 
-    # Patrones para detectar líneas de concepto/producto
-    # Formato típico: "Concepto                                    Cantidad    Precio    Importe"
-    # O: "Producto X    2    15.00    30.00"
+    # Keywords para ignorar (líneas que no son productos)
+    skip_keywords = [
+        'TOTAL', 'BASE IMPONIBLE', 'IVA', 'CUOTA', 'SUBTOTAL', 'NIF', 'CIF',
+        'FACTURA', 'FECHA', 'CLIENTE', 'DOMICILIO', 'POBLACIÓN', 'PROVINCIA',
+        'FORMA DE PAGO', 'CUENTA', 'CONFORME', 'ESCANEADO', 'DERECHOS',
+        'TÉRMINOS', 'CONDICIONES', 'REGISTRO', 'INSCRIPCIÓN', 'PORTES',
+        'REPERCUTIDO', 'SUPLIDOS', 'COBRO TARJETA', 'GARANTÍA', 'PART NUMBER',
+        'CODIGO EAN', 'IMPORTE DTO', 'IMPORTE RE', 'IMPORTE IVA',
+        'DETALLE POR PRODUCTOS', 'CONCEPTO', 'DESCRIPCIÓN', 'CANTIDAD',
+        'PRECIO VENTA', 'VENCIMIENTO', 'COMERCIAL', 'PEDIDO', 'PROVEEDOR'
+    ]
 
-    # Buscar líneas que contengan un importe al final (patrón de item)
+    # Detectar zona de productos buscando cabeceras típicas
+    in_products_zone = False
+    products_zone_start = -1
+
     for i, line in enumerate(lines):
+        line_upper = line.upper().strip()
+        # Detectar inicio de zona de productos
+        if any(header in line_upper for header in ['DETALLE POR PRODUCTOS', 'DESCRIPCIÓN', 'CONCEPTO']):
+            if 'CANTIDAD' in line_upper or 'IMPORTE' in line_upper or i < len(lines) - 1:
+                in_products_zone = True
+                products_zone_start = i
+                continue
+
+    # Si encontramos zona de productos, procesar desde ahí
+    start_line = products_zone_start + 1 if products_zone_start >= 0 else 0
+
+    for i in range(start_line, len(lines)):
+        line = lines[i]
         line_stripped = line.strip()
         if not line_stripped:
             continue
 
-        # Ignorar líneas de totales, IVA, etc.
         line_upper = line_stripped.upper()
-        skip_keywords = ['TOTAL', 'BASE IMPONIBLE', 'IVA', 'CUOTA', 'SUBTOTAL', 'NIF', 'CIF',
-                        'FACTURA', 'FECHA', 'CLIENTE', 'DOMICILIO', 'POBLACIÓN', 'PROVINCIA',
-                        'FORMA DE PAGO', 'CUENTA', 'CONFORME', 'ESCANEADO', 'DERECHOS']
+
+        # Salir de zona de productos si encontramos totales
+        if any(kw in line_upper for kw in ['SUBTOTAL', 'BASE IMPONIBLE', 'TOTAL FACTURA']):
+            break
+
+        # Ignorar líneas de metadatos
         if any(kw in line_upper for kw in skip_keywords):
             continue
 
-        # Buscar patrón: texto + número(s) al final
-        # Ejemplo: "Fibra Pro (01/10/2025 - 31/10/2025)    24.7934 €"
-        item_match = re.search(r'^(.+?)\s+(\d+[.,]\d{2,4})\s*€?$', line_stripped)
-        if item_match:
-            description = item_match.group(1).strip()
-            amount_str = item_match.group(2).replace(',', '.')
+        # Ignorar líneas que son solo información adicional
+        if line_stripped.startswith('(') or line_stripped.startswith('Total de días'):
+            continue
 
-            # Filtrar descripciones muy cortas o que sean solo números
-            if len(description) > 3 and not description.replace('.', '').replace(',', '').isdigit():
-                try:
-                    amount = float(amount_str)
-                    # Solo añadir si el importe es razonable (no es el total ni la base)
-                    if amount != fields.get('total') and amount != fields.get('tax_base'):
-                        line_items.append({
-                            'description': description,
-                            'amount': amount
-                        })
-                except:
-                    pass
-
-        # Buscar patrón con cantidad: "Producto    2    15.00    30.00"
-        multi_num_match = re.search(r'^(.+?)\s+(\d+)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})\s*€?$', line_stripped)
-        if multi_num_match:
-            description = multi_num_match.group(1).strip()
-            quantity = int(multi_num_match.group(2))
-            unit_price = float(multi_num_match.group(3).replace(',', '.'))
-            total_price = float(multi_num_match.group(4).replace(',', '.'))
+        # =====================================================================
+        # PATRÓN 1: Vodafone/DMI - Código + Descripción + Cantidad + Precio + Importe
+        # Ejemplo: "IM12137317  IMPRESORA BROTHER...  1  137,00  137,00"
+        # =====================================================================
+        vodafone_match = re.search(
+            r'^([A-Z]{2}\d+|\d+)\s+(.+?)\s+(\d+)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})\s*€?$',
+            line_stripped
+        )
+        if vodafone_match:
+            code = vodafone_match.group(1).strip()
+            description = vodafone_match.group(2).strip()
+            quantity = int(vodafone_match.group(3))
+            unit_price = float(vodafone_match.group(4).replace(',', '.'))
+            total_price = float(vodafone_match.group(5).replace(',', '.'))
 
             if len(description) > 3:
+                line_items.append({
+                    'code': code,
+                    'description': description,
+                    'quantity': quantity,
+                    'unit_price': unit_price,
+                    'amount': total_price
+                })
+                continue
+
+        # =====================================================================
+        # PATRÓN 2: Cantidad + Descripción + Precio + Importe (sin código)
+        # Ejemplo: "1  IMPRESORA BROTHER  137,00  137,00"
+        # =====================================================================
+        qty_first_match = re.search(
+            r'^(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})\s*€?$',
+            line_stripped
+        )
+        if qty_first_match:
+            quantity = int(qty_first_match.group(1))
+            description = qty_first_match.group(2).strip()
+            unit_price = float(qty_first_match.group(3).replace(',', '.'))
+            total_price = float(qty_first_match.group(4).replace(',', '.'))
+
+            if len(description) > 3 and quantity <= 1000:  # Evitar confundir códigos con cantidades
                 line_items.append({
                     'description': description,
                     'quantity': quantity,
                     'unit_price': unit_price,
                     'amount': total_price
                 })
+                continue
+
+        # =====================================================================
+        # PATRÓN 3: Olivenet - Concepto + Importe (sin cantidad)
+        # Ejemplo: "Static IP (01/10/2025 - 31/10/2025)    15.0000 €"
+        # =====================================================================
+        olivenet_match = re.search(
+            r'^(.+?)\s{2,}(-?\d+[.,]\d{2,4})\s*€?$',
+            line_stripped
+        )
+        if olivenet_match:
+            description = olivenet_match.group(1).strip()
+            amount_str = olivenet_match.group(2).replace(',', '.')
+            amount = float(amount_str)
+
+            # Filtrar descripciones inválidas
+            if len(description) > 5 and not description.replace('.', '').replace(',', '').replace('-', '').isdigit():
+                # No añadir si es el total o la base
+                if abs(amount) != fields.get('total') and abs(amount) != fields.get('tax_base'):
+                    # Detectar si es un descuento
+                    is_discount = amount < 0 or 'DESCUENTO' in description.upper()
+                    line_items.append({
+                        'description': description,
+                        'amount': amount,
+                        'is_discount': is_discount
+                    })
+                    continue
+
+        # =====================================================================
+        # PATRÓN 4: Simple - Texto + Importe al final
+        # Ejemplo: "GASÓLEO A    64.83"
+        # =====================================================================
+        simple_match = re.search(
+            r'^(.+?)\s+(\d+[.,]\d{2})\s*€?$',
+            line_stripped
+        )
+        if simple_match:
+            description = simple_match.group(1).strip()
+            amount_str = simple_match.group(2).replace(',', '.')
+            amount = float(amount_str)
+
+            # Validaciones
+            if len(description) > 3:
+                if not description.replace('.', '').replace(',', '').replace(' ', '').isdigit():
+                    if amount != fields.get('total') and amount != fields.get('tax_base'):
+                        if amount != fields.get('tax_amount'):
+                            line_items.append({
+                                'description': description,
+                                'amount': amount
+                            })
 
     # Eliminar duplicados manteniendo orden
     seen = set()
     unique_items = []
     for item in line_items:
-        key = (item['description'], item.get('amount'))
+        # Crear key única basada en descripción y amount
+        key = (item.get('description', ''), item.get('amount', 0))
         if key not in seen:
             seen.add(key)
             unique_items.append(item)
 
-    fields['line_items'] = unique_items[:20]  # Limitar a 20 items máximo
+    # Validar coherencia: si hay cantidad y unit_price, verificar que coincida con amount
+    for item in unique_items:
+        if 'quantity' in item and 'unit_price' in item and 'amount' in item:
+            expected = round(item['quantity'] * item['unit_price'], 2)
+            actual = round(item['amount'], 2)
+            item['amount_validated'] = abs(expected - actual) < 0.02
+
+    fields['line_items'] = unique_items[:30]  # Limitar a 30 items máximo
 
     return fields
 
