@@ -1459,6 +1459,17 @@ def parse_paddleocr_result(ocr_result):
     if not ocr_result:
         return text_lines, confidences, coordinates_list
 
+    def convert_poly_to_list(poly):
+        """Convertir ndarray o cualquier tipo a lista de Python"""
+        try:
+            if hasattr(poly, 'tolist'):
+                return poly.tolist()
+            elif isinstance(poly, (list, tuple)):
+                return [convert_poly_to_list(p) if hasattr(p, 'tolist') else p for p in poly]
+            return poly
+        except:
+            return []
+
     try:
         logger.info("[OCR PROCESS] Procesando resultado OCR...")
 
@@ -1471,9 +1482,10 @@ def parse_paddleocr_result(ocr_result):
             for i, text in enumerate(texts):
                 if text and text.strip():
                     text_lines.append(text.strip())
-                    confidences.append(scores[i] if i < len(scores) else 0.0)
+                    conf = scores[i] if i < len(scores) else 0.0
+                    confidences.append(float(conf) if hasattr(conf, 'item') else conf)
                     if i < len(polys):
-                        coordinates_list.append(polys[i])
+                        coordinates_list.append(convert_poly_to_list(polys[i]))
                     else:
                         coordinates_list.append([])
 
@@ -1488,9 +1500,10 @@ def parse_paddleocr_result(ocr_result):
                     for i, text in enumerate(texts):
                         if text and text.strip():
                             text_lines.append(text.strip())
-                            confidences.append(scores[i] if i < len(scores) else 0.0)
+                            conf = scores[i] if i < len(scores) else 0.0
+                            confidences.append(float(conf) if hasattr(conf, 'item') else conf)
                             if i < len(polys):
-                                coordinates_list.append(polys[i])
+                                coordinates_list.append(convert_poly_to_list(polys[i]))
                             else:
                                 coordinates_list.append([])
 
@@ -1904,14 +1917,14 @@ MAX_HISTORY = 50
 # para reconstruir la estructura visual del documento, similar a LLMWhisperer.
 # ============================================================================
 
-def format_text_with_layout(text_blocks, coordinates, page_width=100):
+def format_text_with_layout(text_blocks, coordinates, page_width=120):
     """
     Reconstruye la estructura espacial del documento usando coordenadas.
 
     Args:
         text_blocks: Lista de textos detectados
         coordinates: Lista de polígonos/bboxes [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-        page_width: Ancho de caracteres para la salida (default 100)
+        page_width: Ancho de caracteres para la salida (default 120)
 
     Returns:
         Texto formateado manteniendo la estructura espacial
@@ -1919,80 +1932,105 @@ def format_text_with_layout(text_blocks, coordinates, page_width=100):
     if not text_blocks or not coordinates:
         return '\n'.join(text_blocks) if text_blocks else ''
 
+    logger.info(f"[LAYOUT] Procesando {len(text_blocks)} bloques con {len(coordinates)} coordenadas")
+
     # Crear lista de bloques con sus coordenadas
     blocks = []
     for i, text in enumerate(text_blocks):
         if i < len(coordinates) and coordinates[i]:
             poly = coordinates[i]
             # Extraer bounding box del polígono
-            if len(poly) >= 4:
-                # poly es [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                try:
+            try:
+                if isinstance(poly, (list, tuple)) and len(poly) >= 4:
                     if isinstance(poly[0], (list, tuple)):
-                        xs = [p[0] for p in poly]
-                        ys = [p[1] for p in poly]
+                        # poly es [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                        xs = [float(p[0]) for p in poly]
+                        ys = [float(p[1]) for p in poly]
                     else:
-                        # poly es [x1, y1, x2, y2, x3, y3, x4, y4]
-                        xs = [poly[j] for j in range(0, len(poly), 2)]
-                        ys = [poly[j] for j in range(1, len(poly), 2)]
+                        # poly es [x1, y1, x2, y2, x3, y3, x4, y4] o similar
+                        xs = [float(poly[j]) for j in range(0, min(len(poly), 8), 2)]
+                        ys = [float(poly[j]) for j in range(1, min(len(poly), 8), 2)]
 
-                    x_min = min(xs)
-                    y_min = min(ys)
-                    x_max = max(xs)
-                    y_center = (min(ys) + max(ys)) / 2
+                    if xs and ys:
+                        x_min = min(xs)
+                        y_min = min(ys)
+                        x_max = max(xs)
+                        y_max = max(ys)
+                        y_center = (y_min + y_max) / 2
+                        height = y_max - y_min
 
-                    blocks.append({
-                        'text': text,
-                        'x_min': x_min,
-                        'x_max': x_max,
-                        'y_min': y_min,
-                        'y_center': y_center
-                    })
-                except (IndexError, TypeError) as e:
-                    # Si falla el parsing, añadir sin coordenadas
-                    blocks.append({
-                        'text': text,
-                        'x_min': 0,
-                        'x_max': 100,
-                        'y_min': i * 20,
-                        'y_center': i * 20
-                    })
+                        blocks.append({
+                            'text': text,
+                            'x_min': x_min,
+                            'x_max': x_max,
+                            'y_min': y_min,
+                            'y_max': y_max,
+                            'y_center': y_center,
+                            'height': height
+                        })
+                        continue
+            except (IndexError, TypeError, ValueError) as e:
+                logger.debug(f"[LAYOUT] Error parsing poly {i}: {e}")
+
+            # Fallback si falla el parsing
+            blocks.append({
+                'text': text,
+                'x_min': 0,
+                'x_max': 100,
+                'y_min': i * 30,
+                'y_max': i * 30 + 20,
+                'y_center': i * 30 + 10,
+                'height': 20
+            })
         else:
             # Sin coordenadas, posición por defecto
             blocks.append({
                 'text': text,
                 'x_min': 0,
                 'x_max': 100,
-                'y_min': i * 20,
-                'y_center': i * 20
+                'y_min': i * 30,
+                'y_max': i * 30 + 20,
+                'y_center': i * 30 + 10,
+                'height': 20
             })
 
     if not blocks:
         return '\n'.join(text_blocks)
+
+    # Calcular tolerancia dinámica basada en la altura promedio de los bloques
+    avg_height = sum(b['height'] for b in blocks) / len(blocks) if blocks else 20
+    ROW_TOLERANCE = avg_height * 0.6  # 60% de la altura promedio
+
+    logger.info(f"[LAYOUT] Altura promedio: {avg_height:.1f}px, tolerancia fila: {ROW_TOLERANCE:.1f}px")
 
     # Obtener dimensiones del documento
     all_x = [b['x_min'] for b in blocks] + [b['x_max'] for b in blocks]
     doc_width = max(all_x) - min(all_x) if all_x else 1
     x_offset = min(all_x) if all_x else 0
 
-    # Agrupar bloques por filas (Y similar = misma fila)
-    ROW_TOLERANCE = 15  # Píxeles de tolerancia para considerar misma fila
+    logger.info(f"[LAYOUT] Documento: ancho={doc_width:.1f}px, offset_x={x_offset:.1f}px")
 
     # Ordenar por Y primero
     blocks_sorted = sorted(blocks, key=lambda b: b['y_center'])
 
+    # Agrupar bloques por filas (Y similar = misma fila)
     rows = []
     current_row = [blocks_sorted[0]]
 
     for block in blocks_sorted[1:]:
+        # Calcular Y promedio de la fila actual
+        row_y_avg = sum(b['y_center'] for b in current_row) / len(current_row)
+
         # Si está en la misma fila (Y similar)
-        if abs(block['y_center'] - current_row[0]['y_center']) < ROW_TOLERANCE:
+        if abs(block['y_center'] - row_y_avg) < ROW_TOLERANCE:
             current_row.append(block)
         else:
             # Nueva fila
             rows.append(current_row)
             current_row = [block]
     rows.append(current_row)
+
+    logger.info(f"[LAYOUT] Agrupados en {len(rows)} filas")
 
     # Construir salida con espaciado proporcional
     output_lines = []
