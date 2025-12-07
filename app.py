@@ -3820,14 +3820,33 @@ def process():
 
             # Aplicar formato según selección del usuario
             if output_format == 'layout':
-                # Layout: usar pdftotext -layout que preserva espaciado del PDF generado
-                if extracted_text_layout:
+                # Layout: Estrategia híbrida inteligente
+                #
+                # PDFs vectoriales (facturas digitales): pdftotext -layout funciona mejor
+                # PDFs escaneados: usar coordenadas OCR para reconstrucción espacial
+                #
+                # Heurística: si pdftotext -layout tiene mucho más contenido que los
+                # bloques OCR, el PDF es probablemente vectorial y pdftotext es mejor
+
+                pdftotext_chars = len(extracted_text_layout.strip()) if extracted_text_layout else 0
+                ocr_blocks_count = len(ocr_blocks) if ocr_blocks else 0
+
+                # Umbral: pdftotext es preferido si tiene contenido sustancial
+                # y hay pocos bloques OCR (señal de PDF vectorial mal segmentado)
+                use_pdftotext = pdftotext_chars > 500 and (ocr_blocks_count < 50 or pdftotext_chars > ocr_blocks_count * 50)
+
+                if use_pdftotext and extracted_text_layout:
+                    # PRIORIDAD 1: pdftotext -layout para PDFs vectoriales
                     formatted_text = extracted_text_layout
-                    logger.info(f"[PROCESS] Modo Layout (pdftotext) - {len(formatted_text)} chars")
+                    logger.info(f"[PROCESS] Modo Layout (pdftotext - PDF vectorial) - {pdftotext_chars} chars, {ocr_blocks_count} bloques OCR")
                 elif ocr_blocks and coordinates and len(coordinates) > 0:
-                    # Fallback: nuestra reconstrucción con coordenadas
+                    # PRIORIDAD 2: Coordenadas OCR para PDFs escaneados
                     formatted_text = format_text_with_layout(ocr_blocks, coordinates, page_width=120)
-                    logger.info(f"[PROCESS] Modo Layout (coordenadas) - {len(ocr_blocks)} bloques")
+                    logger.info(f"[PROCESS] Modo Layout (coordenadas OCR - PDF escaneado) - {len(ocr_blocks)} bloques, {len(coordinates)} coords")
+                elif extracted_text_layout:
+                    # Fallback: pdftotext si no hay coordenadas
+                    formatted_text = extracted_text_layout
+                    logger.info(f"[PROCESS] Modo Layout (pdftotext fallback) - {len(formatted_text)} chars")
                 else:
                     formatted_text = extracted_text_plain
                     logger.info(f"[PROCESS] Modo Layout fallback a texto plano")
