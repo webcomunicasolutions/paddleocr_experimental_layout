@@ -5591,8 +5591,8 @@ def extract():
         # Extraer campos usando heurísticas
         fields = extract_invoice_fields(raw_text)
 
-        # Aplicar normalización v4.3
-        fields = normalize_fields(fields)
+        # Aplicar normalización v4.3 (pasamos raw_text para detectar moneda)
+        fields = normalize_fields(fields, raw_text=raw_text)
 
         # Auto-detectar tipo de documento
         if document_type == 'auto':
@@ -6187,12 +6187,12 @@ def extract_invoice_fields(text):
 
 def normalize_date(date_str):
     """
-    Normaliza cualquier formato de fecha español a DD-MM-YYYY.
+    Normaliza cualquier formato de fecha español a DD/MM/YYYY.
 
     Formatos soportados:
-    - DD-MM-YY / DD/MM/YY → DD-MM-YYYY (asume 20XX para años < 50, 19XX para >= 50)
-    - DD-MM-YYYY / DD/MM/YYYY → DD-MM-YYYY
-    - DD MMM YYYY (ej: "05 NOV 2025") → DD-MM-YYYY
+    - DD-MM-YY / DD/MM/YY → DD/MM/YYYY (asume 20XX para años < 50, 19XX para >= 50)
+    - DD-MM-YYYY / DD/MM/YYYY → DD/MM/YYYY
+    - DD MMM YYYY (ej: "05 NOV 2025") → DD/MM/YYYY
 
     Returns:
         dict: {'original': str, 'normalized': str, 'valid': bool}
@@ -6229,7 +6229,7 @@ def normalize_date(date_str):
             year_int = int(year)
             # Asumir 2000-2049 para 00-49, 1950-1999 para 50-99
             full_year = 2000 + year_int if year_int < 50 else 1900 + year_int
-            result['normalized'] = f"{day.zfill(2)}-{month.zfill(2)}-{full_year}"
+            result['normalized'] = f"{day.zfill(2)}/{month.zfill(2)}/{full_year}"
             result['valid'] = True
             return result
 
@@ -6237,7 +6237,7 @@ def normalize_date(date_str):
         match = re.match(r'^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$', date_str)
         if match:
             day, month, year = match.groups()
-            result['normalized'] = f"{day.zfill(2)}-{month.zfill(2)}-{year}"
+            result['normalized'] = f"{day.zfill(2)}/{month.zfill(2)}/{year}"
             result['valid'] = True
             return result
 
@@ -6248,7 +6248,7 @@ def normalize_date(date_str):
             # Buscar el mes en el diccionario
             for key, value in months_es.items():
                 if month_name.startswith(key):
-                    result['normalized'] = f"{day.zfill(2)}-{value}-{year}"
+                    result['normalized'] = f"{day.zfill(2)}/{value}/{year}"
                     result['valid'] = True
                     return result
 
@@ -6258,7 +6258,7 @@ def normalize_date(date_str):
             day, month_name, year = match.groups()
             for key, value in months_es.items():
                 if month_name.startswith(key):
-                    result['normalized'] = f"{day.zfill(2)}-{value}-{year}"
+                    result['normalized'] = f"{day.zfill(2)}/{value}/{year}"
                     result['valid'] = True
                     return result
 
@@ -6366,41 +6366,58 @@ def validate_spanish_nif(nif):
     return result
 
 
-def normalize_amount(amount):
+def normalize_amount(amount, default_currency='EUR'):
     """
-    Normaliza un importe a formato estándar float con 2 decimales.
+    Normaliza un importe a formato estándar float con 2 decimales y detecta moneda.
 
     Formatos soportados:
-    - "94,74 €" → 94.74
-    - "94.74 EUR" → 94.74
+    - "94,74 €" → 94.74 EUR
+    - "94.74 EUR" → 94.74 EUR
+    - "$150.00" → 150.00 USD
+    - "£75.50" → 75.50 GBP
     - "1.234,56" → 1234.56 (formato español con miles)
-    - "-12.3967 €" → -12.40 (redondeo a 2 decimales)
+    - "-12.3967 €" → -12.40 EUR (redondeo a 2 decimales)
 
     Returns:
-        dict: {'original': any, 'normalized': float, 'formatted': str, 'valid': bool}
+        dict: {'original': any, 'normalized': float, 'formatted': str, 'currency': str, 'valid': bool}
     """
     import re
 
     if amount is None:
-        return {'original': None, 'normalized': None, 'formatted': None, 'valid': False}
+        return {'original': None, 'normalized': None, 'formatted': None, 'currency': None, 'valid': False}
 
-    # Si ya es float, normalizar
+    # Si ya es float, normalizar con moneda por defecto
     if isinstance(amount, (int, float)):
         normalized = round(float(amount), 2)
         return {
             'original': amount,
             'normalized': normalized,
-            'formatted': f"{normalized:.2f}",
+            'formatted': f"{normalized:.2f} {default_currency}",
+            'currency': default_currency,
             'valid': True
         }
 
-    result = {'original': amount, 'normalized': None, 'formatted': None, 'valid': False}
+    result = {'original': amount, 'normalized': None, 'formatted': None, 'currency': None, 'valid': False}
 
     try:
         amount_str = str(amount).strip()
 
+        # Detectar moneda antes de limpiar
+        currency = default_currency
+        if '€' in amount_str or 'EUR' in amount_str.upper():
+            currency = 'EUR'
+        elif '$' in amount_str or 'USD' in amount_str.upper():
+            currency = 'USD'
+        elif '£' in amount_str or 'GBP' in amount_str.upper():
+            currency = 'GBP'
+        elif 'CHF' in amount_str.upper():
+            currency = 'CHF'
+        elif 'MXN' in amount_str.upper():
+            currency = 'MXN'
+
         # Eliminar símbolos de moneda y espacios
-        amount_clean = re.sub(r'[€$£EUR\s]', '', amount_str, flags=re.IGNORECASE)
+        amount_clean = re.sub(r'[€$£\s]', '', amount_str)
+        amount_clean = re.sub(r'\b(EUR|USD|GBP|CHF|MXN)\b', '', amount_clean, flags=re.IGNORECASE).strip()
 
         # Detectar si hay separador de miles (formato español: 1.234,56)
         if re.match(r'^-?\d{1,3}(\.\d{3})+,\d+$', amount_clean):
@@ -6412,7 +6429,8 @@ def normalize_amount(amount):
 
         normalized = round(float(amount_clean), 2)
         result['normalized'] = normalized
-        result['formatted'] = f"{normalized:.2f}"
+        result['formatted'] = f"{normalized:.2f} {currency}"
+        result['currency'] = currency
         result['valid'] = True
 
     except Exception:
@@ -6421,21 +6439,55 @@ def normalize_amount(amount):
     return result
 
 
-def normalize_fields(fields):
+def detect_currency(text):
+    """
+    Detecta la moneda predominante en el texto del documento.
+
+    Returns:
+        str: Código de moneda (EUR, USD, GBP, CHF, MXN)
+    """
+    import re
+
+    if not text:
+        return 'EUR'
+
+    text_upper = text.upper()
+
+    # Contar ocurrencias de cada símbolo/código de moneda
+    currency_counts = {
+        'EUR': len(re.findall(r'€|EUR\b', text_upper)),
+        'USD': len(re.findall(r'\$|USD\b', text_upper)),
+        'GBP': len(re.findall(r'£|GBP\b', text_upper)),
+        'CHF': len(re.findall(r'CHF\b', text_upper)),
+        'MXN': len(re.findall(r'MXN\b', text_upper)),
+    }
+
+    # Devolver la moneda con más ocurrencias, o EUR por defecto
+    max_currency = max(currency_counts, key=currency_counts.get)
+    if currency_counts[max_currency] > 0:
+        return max_currency
+
+    return 'EUR'
+
+
+def normalize_fields(fields, raw_text=None):
     """
     Aplica normalización v4.3 a todos los campos extraídos.
 
     Normaliza:
-    - date → formato ISO (YYYY-MM-DD)
+    - date → formato DD/MM/YYYY
     - vendor_nif, customer_nif → validación y formato
-    - total, tax_base, tax_amount → formato numérico estándar
-    - line_items.amount → formato numérico estándar
+    - total, tax_base, tax_amount → formato numérico estándar con moneda
+    - line_items.amount → formato numérico estándar con moneda
 
     Returns:
         dict: campos originales más '_normalized' con datos normalizados
     """
     if not fields:
         return fields
+
+    # Detectar moneda del documento
+    document_currency = detect_currency(raw_text) if raw_text else 'EUR'
 
     # Crear copia para no modificar original
     normalized = dict(fields)
@@ -6446,6 +6498,7 @@ def normalize_fields(fields):
         'date': None,
         'vendor_nif': None,
         'customer_nif': None,
+        'currency': document_currency,
         'amounts': {}
     }
 
@@ -6471,24 +6524,32 @@ def normalize_fields(fields):
             normalized['customer_nif_valid'] = nif_norm['control_check']
             normalized['customer_nif_type'] = nif_norm['type']
 
-    # Normalizar importes principales
+    # Normalizar importes principales con la moneda del documento
     amount_fields = ['total', 'tax_base', 'tax_amount']
     for field_name in amount_fields:
         if fields.get(field_name) is not None:
-            amount_norm = normalize_amount(fields[field_name])
+            amount_norm = normalize_amount(fields[field_name], default_currency=document_currency)
             normalized['_normalized']['amounts'][field_name] = amount_norm
+            # Añadir campo formateado con moneda al nivel superior
+            if amount_norm['valid']:
+                normalized[f'{field_name}_formatted'] = amount_norm['formatted']
+
+    # Añadir moneda detectada al nivel superior
+    normalized['currency'] = document_currency
 
     # Normalizar importes en line_items
     if fields.get('line_items'):
         for item in normalized.get('line_items', []):
             if 'amount' in item:
-                amount_norm = normalize_amount(item['amount'])
+                amount_norm = normalize_amount(item['amount'], default_currency=document_currency)
                 if amount_norm['valid']:
                     item['amount_normalized'] = amount_norm['normalized']
+                    item['amount_formatted'] = amount_norm['formatted']
             if 'unit_price' in item:
-                price_norm = normalize_amount(item['unit_price'])
+                price_norm = normalize_amount(item['unit_price'], default_currency=document_currency)
                 if price_norm['valid']:
                     item['unit_price_normalized'] = price_norm['normalized']
+                    item['unit_price_formatted'] = price_norm['formatted']
 
     return normalized
 
