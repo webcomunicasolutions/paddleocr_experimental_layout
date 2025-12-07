@@ -1537,14 +1537,25 @@ def proc_pdf_ocr(n8nHomeDir, base_name, ext):
         # Leer texto consolidado de todas las paginas (opcional)
         # Esto es para compatibilidad con el sistema anterior
         try:
+            # Archivo original (antes de OCR) - importante para PDFs vectoriales
+            original_pdf = f"{n8nHomeDir}/in/{base_name}{ext}"
+
             # Extraer texto del PDF final - dos versiones:
             # 1. Sin layout (rápido, texto plano)
             result_plain = subprocess.run(['pdftotext', final_pdf, '-'], capture_output=True, text=True)
             extracted_text_plain = result_plain.stdout if result_plain.returncode == 0 else ""
 
-            # 2. Con layout (mantiene estructura espacial)
-            result_layout = subprocess.run(['pdftotext', '-layout', final_pdf, '-'], capture_output=True, text=True)
-            extracted_text_layout = result_layout.stdout if result_layout.returncode == 0 else ""
+            # 2. Con layout del PDF ORIGINAL (para PDFs vectoriales)
+            # El PDF original conserva mejor el layout que el procesado por OCR
+            if os.path.exists(original_pdf):
+                result_layout = subprocess.run(['pdftotext', '-layout', original_pdf, '-'], capture_output=True, text=True)
+                extracted_text_layout = result_layout.stdout if result_layout.returncode == 0 else ""
+                logger.info(f"[PROC_PDF_OCR] Layout extraido del PDF original: {len(extracted_text_layout)} chars")
+            else:
+                # Fallback: usar PDF procesado
+                result_layout = subprocess.run(['pdftotext', '-layout', final_pdf, '-'], capture_output=True, text=True)
+                extracted_text_layout = result_layout.stdout if result_layout.returncode == 0 else ""
+                logger.info(f"[PROC_PDF_OCR] Layout extraido del PDF procesado (fallback): {len(extracted_text_layout)} chars")
 
             text_length = len(extracted_text_plain.strip())
 
@@ -2252,8 +2263,11 @@ OCR_REGEX_CORRECTIONS = [
     (re.compile(r'(\d+):(\d{3})(?!\d)'), r'\1,\2'),
     # Puntos como separador decimal en contexto de precio: 11.60 -> 11,60 (solo si parece precio)
     # No aplicar porque el punto es correcto en muchos contextos
-    # Espacios extras
-    (re.compile(r'\s{3,}'), '  '),
+
+    # IMPORTANTE: NO usar \s para espacios porque incluye \n y destruye el layout
+    # Usar [ \t] (solo espacios y tabs horizontales) o simplemente ' ' (espacio)
+    # DESACTIVADO para preservar el layout de pdftotext:
+    # (re.compile(r'[ \t]{3,}'), '  '),  # Solo espacios horizontales, no newlines
 ]
 
 

@@ -320,6 +320,203 @@ print(f'Coordenadas disponibles: {len(page[\"rec_polys\"])}')
 
 ---
 
-**Ultima actualizacion:** 2025-12-07 11:00
-**Estado:** Coordenadas verificadas y funcionando correctamente
-**Proxima sesion:** Implementar modo Layout con ordenamiento espacial
+# FIX DEFINITIVO: Layout Mode - 2025-12-07 19:20
+
+## Resumen Ejecutivo
+
+✅ **LAYOUT MODE FUNCIONANDO CORRECTAMENTE**
+
+El modo Layout ahora preserva perfectamente la estructura espacial de los documentos:
+- **Antes del fix**: 2446 chars, 5 newlines (texto destruido)
+- **Después del fix**: 5816 chars, 91 newlines (layout perfecto)
+
+## Problemas Encontrados y Soluciones
+
+### Problema 1: pdftotext extraía del PDF procesado (no del original)
+
+**Síntoma**: El texto con layout tenía pocos newlines y espaciado incorrecto.
+
+**Causa**: En `app.py` línea 1546, `pdftotext -layout` se ejecutaba sobre el PDF **procesado** (con capa OCR añadida) en lugar del PDF **original**.
+
+```python
+# ANTES (incorrecto):
+result_layout = subprocess.run(['pdftotext', '-layout', final_pdf, '-'], ...)
+# final_pdf = PDF procesado con OCR, pierde layout original
+```
+
+**Solución** (líneas 1540-1558):
+```python
+# DESPUÉS (correcto):
+original_pdf = f"{n8nHomeDir}/in/{base_name}{ext}"
+
+if os.path.exists(original_pdf):
+    result_layout = subprocess.run(['pdftotext', '-layout', original_pdf, '-'], ...)
+    # original_pdf = PDF original, conserva layout perfecto
+else:
+    # Fallback al procesado si el original no existe
+    result_layout = subprocess.run(['pdftotext', '-layout', final_pdf, '-'], ...)
+```
+
+**Por qué funciona**: El PDF original (vectorial) tiene la estructura espacial intacta. El PDF procesado pierde esa información porque la capa OCR se superpone.
+
+---
+
+### Problema 2: Regex `\s{3,}` destruía newlines y espacios
+
+**Síntoma**: El texto llegaba con 5818 chars y 91 newlines, pero después de `apply_ocr_corrections()` quedaba con 2446 chars y 5 newlines.
+
+**Causa**: En `app.py` línea 2267, había un regex dañino:
+
+```python
+# ANTES (destructor):
+OCR_REGEX_CORRECTIONS = [
+    ...
+    (re.compile(r'\s{3,}'), '  '),  # ← ESTE ERA EL PROBLEMA
+]
+```
+
+**Por qué destruía el layout**:
+- `\s` incluye TODOS los whitespace: espacios, tabs, Y NEWLINES (`\n`)
+- Cuando había `\n\n\n` (3 newlines para separar secciones), se reemplazaba por `  ` (2 espacios)
+- Cuando había `      ` (6 espacios para columnas), se reemplazaba por `  ` (2 espacios)
+- Resultado: layout completamente destruido
+
+**Solución** (líneas 2267-2270):
+```python
+# DESPUÉS (correcto):
+OCR_REGEX_CORRECTIONS = [
+    ...
+    # IMPORTANTE: NO usar \s para espacios porque incluye \n y destruye el layout
+    # DESACTIVADO para preservar el layout de pdftotext:
+    # (re.compile(r'[ \t]{3,}'), '  '),  # Solo espacios horizontales, no newlines
+]
+```
+
+**Alternativa si se necesita limpiar espacios**: Usar `[ \t]{3,}` que solo afecta espacios horizontales, no newlines.
+
+---
+
+## Flujo Correcto del Layout Mode
+
+```
+1. Usuario sube PDF vectorial (factura digital)
+   ↓
+2. /process guarda en /home/n8n/in/temp_xxx_factura.pdf
+   ↓
+3. /ocr procesa el PDF (OCR, capa texto, etc.)
+   ↓
+4. proc_pdf_ocr() extrae layout del PDF ORIGINAL (no del procesado)
+   ↓
+5. extracted_text_layout tiene 5818 chars, 91 newlines ✓
+   ↓
+6. /process selecciona pdftotext porque:
+   - pdftotext_chars (5818) > 500 ✓
+   - ocr_blocks_count (10) < 50 ✓
+   ↓
+7. apply_ocr_corrections() NO destruye el layout (regex desactivado)
+   ↓
+8. Respuesta: 5816 chars, 91 newlines, layout perfecto ✓
+```
+
+---
+
+## Estrategia Híbrida Inteligente
+
+El endpoint `/process` con `format=layout` usa una estrategia híbrida:
+
+```python
+# Heurística para elegir método:
+use_pdftotext = pdftotext_chars > 500 and (ocr_blocks_count < 50 or pdftotext_chars > ocr_blocks_count * 50)
+
+if use_pdftotext:
+    # PDFs vectoriales: pdftotext -layout del original
+    formatted_text = extracted_text_layout
+elif ocr_blocks and coordinates:
+    # PDFs escaneados: reconstrucción con coordenadas OCR
+    formatted_text = format_text_with_layout(ocr_blocks, coordinates)
+else:
+    # Fallback
+    formatted_text = extracted_text_plain
+```
+
+**Cuándo usa cada método**:
+- **PDFs vectoriales** (facturas digitales): `pdftotext -layout` funciona mejor
+- **PDFs escaneados** (fotos, scans): Coordenadas OCR para reconstrucción espacial
+
+---
+
+## Ejemplo de Resultado Correcto
+
+```
+             OLIVENET NETWORK S.L.U.
+                                                        Ref. Cliente: 221598
+             Dirección: CALLE PEPITA BARRIENTOS, nº7,
+                                                        Nombre: Juan Jose Sanchez Bernal
+             OFICINA 313 29004 MÁLAGA
+                                                        Domicilio: Pl. De La Ermita, Bldg. 006,
+             CIF: B93340198
+                                                        Tienda
+             Nº de factura: ON2025-584267
+                                                        Población: Monda - 29110
+
+     Total (Base Imponible)                                                                       78.30 €
+     IVA (21%)                                                                                    16.44 €
+     Total Factura                                                                                94.74 €
+
+Detalle por productos
+  Concepto                                                                                          Importe
+  Static IP (01/10/2025 - 31/10/2025)                                                             15.0000 €
+```
+
+**Observa**:
+- Columna izquierda: datos de la empresa
+- Columna derecha: datos del cliente
+- Tabla de totales con alineación correcta
+- Tabla de productos con concepto e importe separados
+
+---
+
+## Archivos Modificados
+
+| Archivo | Líneas | Cambio |
+|---------|--------|--------|
+| `app.py` | 1540-1558 | Extraer layout del PDF original, no del procesado |
+| `app.py` | 2267-2270 | Desactivar regex `\s{3,}` que destruía layout |
+
+---
+
+## Lecciones Aprendidas
+
+1. **`\s` en regex incluye `\n`**: Nunca usar `\s` para limpiar espacios si quieres preservar newlines. Usar `[ \t]` para solo espacios horizontales.
+
+2. **pdftotext -layout necesita el PDF original**: El PDF con capa OCR pierde información de layout. Siempre usar el PDF original para extraer estructura espacial.
+
+3. **Debug con logging es esencial**: Añadir logs antes/después de cada transformación ayuda a identificar dónde se corrompen los datos.
+
+4. **Estrategia híbrida**: Diferentes tipos de PDF necesitan diferentes métodos. No hay una solución única.
+
+---
+
+## Comandos de Test
+
+```bash
+# Test rápido Layout mode
+curl -s -X POST http://localhost:8503/process \
+  -F "file=@factura.pdf" \
+  -F "format=layout" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+t=d.get('text','')
+print(f'Chars: {len(t)}, Newlines: {t.count(chr(10))}')
+print(t[:1000])
+"
+
+# Verificar que pdftotext -layout funciona en el original
+docker exec paddlepaddle-cpu pdftotext -layout /tmp/test.pdf - | head -30
+```
+
+---
+
+**Última actualización:** 2025-12-07 19:20
+**Estado:** ✅ Layout Mode funcionando correctamente
+**Versión:** v3.1.1
