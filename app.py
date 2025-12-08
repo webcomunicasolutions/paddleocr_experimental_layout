@@ -8,6 +8,11 @@ LAZY LOADING: Flask arranca primero, modelos se cargan después
 DEBUG MODE: Logging extensivo para diagnosticar problemas de arranque
 """
 
+# =============================================================================
+# VERSION
+# =============================================================================
+VERSION = "4.7.2"
+
 import os
 import sys
 import json
@@ -1898,6 +1903,7 @@ def health():
     # El estado real se muestra en los campos adicionales
     return jsonify({
         'status': 'healthy',
+        'version': VERSION,
         'uptime_seconds': round(uptime, 1),
         'memory_usage': memory,
         'models_loaded': models_loaded,
