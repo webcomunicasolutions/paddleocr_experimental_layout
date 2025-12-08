@@ -2525,10 +2525,11 @@ def detect_table_structure(blocks, rows):
     # Patrones que indican FIN de la tabla de productos
     END_TABLE_PATTERNS = [
         r'(?i)(forma\s*de\s*pago|vencimiento|total\s*factura)',
-        r'(?i)(base\s*imponible|subtotal|importe\s*total)',
-        r'(?i)(iva\s*\d+|recargo|descuento\s*total)',
+        r'(?i)(base\s*imponible|baseimponible|subtotal|importe\s*total)',
+        r'(?i)(iva\s*\d+|%\s*iva|cuota|recargo|descuento\s*total)',
         r'(?i)(garantia|garant[ií]a|registro|domicilio\s*social)',
         r'(?i)(banco|c\.?c\.?c\.?|iban)',
+        r'(?i)(total\s*en\s*eur|total\s*eur|total\s*€)',  # Para facturas internacionales
     ]
 
     # Buscar fila de headers
@@ -2567,10 +2568,10 @@ def detect_table_structure(blocks, rows):
 
         # Contar patrones de precio en la fila
         prices = PRICE_PATTERN.findall(row_text)
-        if len(prices) >= 2:  # Al menos 2 precios = probable línea de producto
+        if len(prices) >= 1:  # Al menos 1 precio = probable línea de producto (relajado de 2)
             result['data_rows'].append(row_idx)
 
-    result['is_table'] = result['header_row_idx'] >= 0 and len(result['data_rows']) >= 2
+    result['is_table'] = result['header_row_idx'] >= 0 and len(result['data_rows']) >= 1  # Relajado de 2
 
     if result['is_table']:
         # Detectar posiciones X de columnas basándose en la fila de headers
