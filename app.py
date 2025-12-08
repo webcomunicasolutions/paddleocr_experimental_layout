@@ -11,7 +11,7 @@ DEBUG MODE: Logging extensivo para diagnosticar problemas de arranque
 # =============================================================================
 # VERSION
 # =============================================================================
-VERSION = "4.8.0"
+VERSION = "4.7.3"
 
 import os
 import sys
@@ -1309,15 +1309,10 @@ def extract_pdf_images(n8nHomeDir, base_name, in_pdf, out_png, target_dpi=288):
         fallback_img.save(out_png, dpi=(target_dpi, target_dpi))
 
 
-def create_spdf(n8nHomeDir, base_name, in_pdf, spdf, page_num, ocr_dpi=288, force_full_ocr=False):
+def create_spdf(n8nHomeDir, base_name, in_pdf, spdf, page_num, ocr_dpi=288):
     """
     Procesar una pagina individual: escaneada o vectorial
     Genera PDF perfecto de una sola pagina
-
-    Args:
-        force_full_ocr: Si True, fuerza renderizado completo con pdftoppm incluso para
-                        PDFs vectoriales. Útil para layout_pipes donde necesitamos OCR
-                        de todo el contenido para obtener coordenadas precisas.
 
     Returns:
         Tupla (text_lines, confidences, coordinates) con los datos OCR de la página
@@ -1328,11 +1323,6 @@ def create_spdf(n8nHomeDir, base_name, in_pdf, spdf, page_num, ocr_dpi=288, forc
 
     # Detectar tipo de pagina
     page_scanned = det_scanned(in_pdf)
-
-    # Si force_full_ocr, tratar como escaneado para usar pdftoppm (renderiza TODO el PDF)
-    if force_full_ocr and not page_scanned:
-        logger.info(f"[CREATE_SPDF] force_full_ocr=True: Forzando renderizado completo con pdftoppm")
-        page_scanned = True
 
     if page_scanned:
 
@@ -1446,12 +1436,8 @@ def create_spdf(n8nHomeDir, base_name, in_pdf, spdf, page_num, ocr_dpi=288, forc
     return text_lines, confidences, coordinates
 
 
-def proc_pdf_ocr(n8nHomeDir, base_name, ext, force_full_ocr=False):
-    """Procesar PDF: detectar orientacion, corregir inclinacion y ejecutar OCR
-
-    Args:
-        force_full_ocr: Si True, fuerza OCR completo incluso en PDFs vectoriales
-    """
+def proc_pdf_ocr(n8nHomeDir, base_name, ext):
+    """Procesar PDF: detectar orientacion, corregir inclinacion y ejecutar OCR"""
     global doc_preprocessor, ocr_instance
 
     try:
@@ -1508,7 +1494,7 @@ def proc_pdf_ocr(n8nHomeDir, base_name, ext, force_full_ocr=False):
             logger.info(f"[PROC_PDF_OCR] =================================  Iniciando pagina {page}/{pages}  ===================================")
 
             # Procesar pagina individual y obtener datos OCR
-            page_texts, page_confs, page_coords = create_spdf(n8nHomeDir, base_name, page_pdf, spdf, page, force_full_ocr=force_full_ocr)
+            page_texts, page_confs, page_coords = create_spdf(n8nHomeDir, base_name, page_pdf, spdf, page)
 
             # Acumular datos OCR
             all_text_lines.extend(page_texts)
@@ -2011,13 +1997,8 @@ def ocr():
                 return jsonify({'error': 'Image preparation failed'}), 500
 
         # 3. PROCESAMIENTO OCR (orientacion + OCR integrado)
-        # Parámetro force_full_ocr: fuerza OCR completo incluso en PDFs vectoriales
-        force_full_ocr = request.form.get('force_full_ocr', 'false').lower() == 'true'
-        if force_full_ocr:
-            logger.info("[OCR] force_full_ocr=True: Se forzará OCR completo con pdftoppm")
-
         logger.info("[OCR] Ejecutando procesamiento OCR completo...")
-        success, message, ocr_data = proc_pdf_ocr(n8nHomeDir, base_name, ext, force_full_ocr=force_full_ocr)
+        success, message, ocr_data = proc_pdf_ocr(n8nHomeDir, base_name, ext)
 
         if not success:
             logger.error(f"[OCR] Error en procesamiento: {message}")
@@ -4401,16 +4382,10 @@ def process():
 
         # Llamar al endpoint /ocr internamente usando la lógica de Paco
         # Creamos un request simulado
-        # Para layout_pipes, forzamos OCR completo (usa pdftoppm incluso en vectoriales)
-        ocr_data = {'filename': temp_file_path}
-        if output_format == 'layout_pipes':
-            ocr_data['force_full_ocr'] = 'true'
-            logger.info(f"[PROCESS] Formato layout_pipes: forzando OCR completo con pdftoppm")
-
         with app.test_request_context(
             '/ocr',
             method='POST',
-            data=ocr_data
+            data={'filename': temp_file_path}
         ):
             response = ocr()
 
@@ -4455,18 +4430,29 @@ def process():
 
             # Aplicar formato según selección del usuario
             if output_format == 'layout_pipes':
-                # Layout Pipes v4.8: SIEMPRE usa coordenadas OCR
-                # Con force_full_ocr=True, pdftoppm renderiza TODO el PDF (incluso vectoriales)
-                # Esto garantiza coordenadas OCR precisas para formateo con pipes
+                # Layout Pipes: Formateo de tablas con pipes para IAs
+                # Estrategia híbrida:
+                # - PDFs vectoriales: pdftotext + add_pipes_to_pdftotext()
+                # - PDFs escaneados: format_text_with_layout() con coordenadas OCR
 
-                if ocr_blocks and coordinates and len(coordinates) > 0:
-                    # Usar coordenadas OCR con formateo de tablas (detecta y añade pipes)
-                    formatted_text = format_text_with_layout(ocr_blocks, coordinates, page_width=200)
-                    logger.info(f"[PROCESS] Modo Layout Pipes v4.8 (OCR coords) - {len(ocr_blocks)} bloques, {len(coordinates)} coords")
-                elif extracted_text_layout:
-                    # Fallback: pdftotext con pipes (no debería llegar aquí con force_full_ocr)
+                pdftotext_chars = len(extracted_text_layout.strip()) if extracted_text_layout else 0
+                ocr_blocks_count = len(ocr_blocks) if ocr_blocks else 0
+
+                # Heurística: PDF vectorial si pdftotext tiene mucho más contenido
+                is_vectorial = pdftotext_chars > 500 and (ocr_blocks_count < 50 or pdftotext_chars > ocr_blocks_count * 30)
+
+                if is_vectorial and extracted_text_layout:
+                    # PDF vectorial: usar pdftotext y añadir pipes a tablas detectadas
                     formatted_text = add_pipes_to_pdftotext(extracted_text_layout)
-                    logger.info(f"[PROCESS] Modo Layout Pipes (fallback pdftotext) - {len(formatted_text)} chars")
+                    logger.info(f"[PROCESS] Modo Layout Pipes (pdftotext + pipes) - {pdftotext_chars} chars, {ocr_blocks_count} bloques OCR")
+                elif ocr_blocks and coordinates and len(coordinates) > 0:
+                    # PDF escaneado: usar coordenadas OCR con formateo de tablas
+                    formatted_text = format_text_with_layout(ocr_blocks, coordinates, page_width=200)
+                    logger.info(f"[PROCESS] Modo Layout Pipes (coordenadas OCR) - {len(ocr_blocks)} bloques, {len(coordinates)} coords")
+                elif extracted_text_layout:
+                    # Fallback: pdftotext con pipes
+                    formatted_text = add_pipes_to_pdftotext(extracted_text_layout)
+                    logger.info(f"[PROCESS] Modo Layout Pipes (fallback pdftotext + pipes) - {len(formatted_text)} chars")
                 else:
                     formatted_text = extracted_text_plain
                     logger.info(f"[PROCESS] Modo Layout Pipes fallback a texto plano")
