@@ -4,10 +4,10 @@
 
 ## Estado Actual del Proyecto
 
-### Versión: 4.5 (Layout Mejorado para IA) - ESTABLE
-### Próximo objetivo: Continuar validación masiva (~175 facturas)
+### Versión: 4.6 (Detección de Tablas) - EN PRUEBAS
+### Próximo objetivo: Probar extracción de line_items con IA (Haiku/Gemini)
 
-**ÚLTIMA ACTUALIZACIÓN:** 2025-12-08 - v4.5 completada. Layout mejorado para consumo por IA.
+**ÚLTIMA ACTUALIZACIÓN:** 2025-12-08 - v4.6 implementada. Detección y formateo de tablas para facturas escaneadas.
 
 ---
 
@@ -69,7 +69,7 @@
   - Filtra líneas que solo son fechas (DD-MM-YYYY)
   - Limpia "Garantía: DD-MM-YYYY" al final de descripciones
 
-### v4.5 - Layout Mejorado para IA ✅ (NUEVA)
+### v4.5 - Layout Mejorado para IA ✅
 - **Objetivo**: Generar texto optimizado para consumo por IA (Claude, GPT)
 - **Preservación espacial absoluta**: Transforma coordenadas X del documento a posiciones de caracteres
 - **Estrategia híbrida inteligente**:
@@ -81,6 +81,21 @@
   - Olivenet: Estructura 2 columnas preservada ✅
   - DIGI: Layout complejo de 2 páginas preservado ✅
   - Escaneadas: Tablas con columnas alineadas ✅
+
+### v4.6 - Detección y Formateo de Tablas ✅ (NUEVA)
+- **Objetivo**: Mejorar la legibilidad de tablas de productos para extracción de line_items
+- **Detección automática de tablas**:
+  - Busca filas de headers (CODIGO, DESCRIPCION, CANTIDAD, PRECIO, IMPORTE, etc.)
+  - Identifica filas de datos con 2+ precios
+  - Detecta fin de tabla (FORMA DE PAGO, TOTAL FACTURA, IVA, GARANTÍA, etc.)
+- **Formateo con separadores**:
+  - Headers y datos con separadores `|`
+  - Línea separadora `+---+---+` después del header
+  - Anchos de columna proporcionales basados en posiciones X
+- **Resultados verificados**:
+  - escaneadas 400_3.pdf: 4 productos detectados, formateo correcto ✅
+  - escaneadas 400_5.pdf: 7 productos detectados, formateo correcto ✅
+  - Olivenet (vectorial): No afectado, usa pdftotext ✅
 
 ---
 
@@ -160,10 +175,39 @@ docker cp app.py paddlepaddle-cpu:/app/app.py && docker restart paddlepaddle-cpu
 
 ## TAREAS PENDIENTES
 
-1. **Continuar validación masiva** - 155 facturas restantes
-2. **std::exception en PP-Structure** - Investigar causa raíz
-3. **Mejorar facturas internacionales** - Layouts muy diferentes
-4. **LINE_ITEMS para tickets escaneados** - OCR no preserva estructura
+1. **Mejorar extracción de TABLAS/LINE_ITEMS** - Ver opciones abajo
+2. **Continuar validación masiva** - ~145 facturas restantes
+3. **std::exception en PP-Structure** - Investigar causa raíz
+
+---
+
+## OPCIONES PARA MEJORAR TABLAS (v4.6+)
+
+### Opción 1: PP-Structure (SLANet)
+- **Qué es**: Pipeline de PaddleX para reconocimiento de tablas
+- **Ventajas**: Devuelve HTML estructurado, detecta celdas automáticamente
+- **Desventajas**: Errores std::exception intermitentes, lento
+- **Estado**: Integrado en /structure pero inestable
+
+### Opción 2: Mejorar layout para tablas ⬅️ ELEGIDA
+- **Qué es**: Detectar patrones de tabla en el layout actual
+- **Ventajas**: Estable, rápido, la IA puede leer tablas bien formateadas
+- **Implementación**:
+  - Detectar headers de tabla (Código, Descripción, Cantidad, Precio, Importe)
+  - Usar coordenadas X para alinear columnas con separadores
+  - Formatear como tabla ASCII o con tabuladores
+- **Estado**: EN DESARROLLO
+
+### Opción 3: Post-procesamiento con regex
+- **Qué es**: Después del layout, aplicar patrones regex para extraer line_items
+- **Ventajas**: No modifica el layout base
+- **Desventajas**: Frágil, depende de patrones específicos por proveedor
+- **Implementación**: Patrones como `(\d+)\s+(.+?)\s+(\d+[,\.]\d+)\s+(\d+[,\.]\d+)`
+- **Estado**: PENDIENTE
+
+### Decisión: Empezar con Opción 2
+La IA (Haiku/Gemini) puede extraer line_items si el layout de la tabla está bien formateado.
+El objetivo es que las columnas estén alineadas y sean legibles.
 
 ---
 

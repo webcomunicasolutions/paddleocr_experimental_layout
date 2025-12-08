@@ -2478,6 +2478,195 @@ def detect_columns_dbscan(x_positions, eps_factor=0.05):
         return [(min(x_positions), max(x_positions))]
 
 
+# =========================================================================
+# DETECCIÓN DE TABLAS v4.6 - Para formateo mejorado de productos/line_items
+# =========================================================================
+
+# Patrones de headers de tabla comunes en facturas españolas
+TABLE_HEADER_PATTERNS = [
+    r'(?i)(c[oó]digo|art[ií]culo|ref\.?)',
+    r'(?i)(descripci[oó]n|concepto|detalle|producto)',
+    r'(?i)(cantidad|cant\.?|uds\.?|unid\.?)',
+    r'(?i)(precio|p\.?u\.?|pvp|valor)',
+    r'(?i)(dto\.?|desc\.?|descuento)',
+    r'(?i)(importe|total|neto|subtotal)',
+    r'(?i)(iva|%)',
+]
+
+# Patrón para detectar líneas de producto (tienen precios)
+PRICE_PATTERN = re.compile(r'\d+[,\.]\d{2}')
+QUANTITY_PATTERN = re.compile(r'^\d+$|^\d+[,\.]\d+$')
+
+
+def detect_table_structure(blocks, rows):
+    """
+    Detecta si hay una estructura de tabla en el documento.
+    v4.6: Mejorada para distinguir productos de totales.
+
+    Returns:
+        dict con:
+        - is_table: bool - si se detectó tabla
+        - header_row_idx: int - índice de la fila de headers (-1 si no hay)
+        - data_rows: list - índices de filas con datos de tabla
+        - columns: list - posiciones X de columnas detectadas
+    """
+    import re
+
+    result = {
+        'is_table': False,
+        'header_row_idx': -1,
+        'data_rows': [],
+        'columns': []
+    }
+
+    if not rows or len(rows) < 3:
+        return result
+
+    # Patrones que indican FIN de la tabla de productos
+    END_TABLE_PATTERNS = [
+        r'(?i)(forma\s*de\s*pago|vencimiento|total\s*factura)',
+        r'(?i)(base\s*imponible|subtotal|importe\s*total)',
+        r'(?i)(iva\s*\d+|recargo|descuento\s*total)',
+        r'(?i)(garantia|garant[ií]a|registro|domicilio\s*social)',
+        r'(?i)(banco|c\.?c\.?c\.?|iban)',
+    ]
+
+    # Buscar fila de headers
+    header_matches_per_row = []
+    for row_idx, row in enumerate(rows):
+        row_text = ' '.join(b['text'] for b in row).upper()
+        matches = 0
+        for pattern in TABLE_HEADER_PATTERNS:
+            if re.search(pattern, row_text, re.IGNORECASE):
+                matches += 1
+        header_matches_per_row.append((row_idx, matches, row_text[:80]))
+
+    # La fila con más matches de headers (mínimo 3)
+    best_header = max(header_matches_per_row, key=lambda x: x[1])
+    if best_header[1] >= 3:
+        result['header_row_idx'] = best_header[0]
+        logger.info(f"[TABLE-DETECT] Header detectado en fila {best_header[0]}: {best_header[2]}")
+
+    # Buscar filas de datos (tienen precios) - pero parar en patrones de cierre
+    table_ended = False
+    for row_idx, row in enumerate(rows):
+        if row_idx <= result.get('header_row_idx', -1):
+            continue
+
+        row_text = ' '.join(b['text'] for b in row)
+
+        # Verificar si encontramos un patrón de fin de tabla
+        for end_pattern in END_TABLE_PATTERNS:
+            if re.search(end_pattern, row_text, re.IGNORECASE):
+                table_ended = True
+                logger.info(f"[TABLE-DETECT] Fin de tabla en fila {row_idx}: {row_text[:50]}")
+                break
+
+        if table_ended:
+            break
+
+        # Contar patrones de precio en la fila
+        prices = PRICE_PATTERN.findall(row_text)
+        if len(prices) >= 2:  # Al menos 2 precios = probable línea de producto
+            result['data_rows'].append(row_idx)
+
+    result['is_table'] = result['header_row_idx'] >= 0 and len(result['data_rows']) >= 2
+
+    if result['is_table']:
+        # Detectar posiciones X de columnas basándose en la fila de headers
+        header_row = rows[result['header_row_idx']]
+        header_positions = sorted([b['x_min'] for b in header_row])
+        result['columns'] = header_positions
+        logger.info(f"[TABLE-DETECT] Tabla detectada: {len(result['data_rows'])} filas de datos, {len(result['columns'])} columnas")
+
+    return result
+
+
+def calculate_table_column_widths(column_positions, page_width=200):
+    """
+    Calcula los anchos de columna basados en posiciones X.
+
+    Returns:
+        Lista de anchos en caracteres para cada columna
+    """
+    num_cols = len(column_positions)
+    sorted_positions = sorted(column_positions)
+
+    col_widths = []
+    total_width = sorted_positions[-1] - sorted_positions[0] if len(sorted_positions) > 1 else 1
+
+    for i in range(num_cols):
+        if i < num_cols - 1:
+            width_ratio = (sorted_positions[i + 1] - sorted_positions[i]) / total_width
+        else:
+            width_ratio = 1.0 / num_cols
+
+        char_width = max(8, min(40, int(width_ratio * (page_width - num_cols - 1))))
+        col_widths.append(char_width)
+
+    return col_widths
+
+
+def format_table_row(row_blocks, column_positions, page_width=200, col_widths=None):
+    """
+    Formatea una fila de tabla con columnas bien alineadas.
+    v4.6: Distribución proporcional de columnas basada en posiciones X.
+
+    Args:
+        row_blocks: Lista de bloques de texto en la fila
+        column_positions: Posiciones X de las columnas
+        page_width: Ancho en caracteres
+        col_widths: Anchos precalculados (opcional, se calculan si no se proveen)
+
+    Returns:
+        String formateado con separadores de columna
+    """
+    if not column_positions or len(column_positions) < 2:
+        return ' '.join(b['text'] for b in row_blocks)
+
+    # Ordenar bloques por X
+    sorted_blocks = sorted(row_blocks, key=lambda b: b['x_min'])
+
+    # Usar anchos precalculados o calcular
+    if col_widths is None:
+        col_widths = calculate_table_column_widths(column_positions, page_width)
+
+    num_cols = len(column_positions)
+    sorted_positions = sorted(column_positions)
+
+    # Asignar cada bloque a su columna más cercana
+    columns_content = [[] for _ in range(num_cols)]
+
+    for block in sorted_blocks:
+        # Encontrar columna más cercana
+        min_dist = float('inf')
+        col_idx = 0
+        for i, col_x in enumerate(sorted_positions):
+            dist = abs(block['x_min'] - col_x)
+            if dist < min_dist:
+                min_dist = dist
+                col_idx = i
+        columns_content[col_idx].append(block['text'])
+
+    # Formatear cada columna
+    formatted_cols = []
+    for i, col_texts in enumerate(columns_content):
+        text = ' '.join(col_texts)
+        col_width = col_widths[i] if i < len(col_widths) else 12
+
+        # Truncar si es muy largo, alinear si es corto
+        if len(text) > col_width:
+            text = text[:col_width-2] + '..'
+        formatted_cols.append(text.ljust(col_width))
+
+    return '|' + '|'.join(formatted_cols) + '|'
+
+
+def format_table_separator(col_widths):
+    """Genera una línea separadora para la tabla."""
+    return '+' + '+'.join(['-' * w for w in col_widths]) + '+'
+
+
 def format_text_with_layout(text_blocks, coordinates, page_width=200, use_dbscan=True):
     """
     Reconstruye la estructura espacial del documento usando coordenadas.
@@ -2630,6 +2819,17 @@ def format_text_with_layout(text_blocks, coordinates, page_width=200, use_dbscan
     logger.info(f"[LAYOUT] Ancho promedio por caracter: {char_width_px:.1f}px")
 
     # =========================================================================
+    # DETECCIÓN DE TABLAS v4.6
+    # =========================================================================
+    table_info = detect_table_structure(blocks, rows)
+    table_col_widths = None
+    if table_info['is_table']:
+        logger.info(f"[LAYOUT v4.6] TABLA DETECTADA - Header en fila {table_info['header_row_idx']}, {len(table_info['data_rows'])} filas de datos")
+        # Precalcular anchos de columna para consistencia
+        table_col_widths = calculate_table_column_widths(table_info['columns'], page_width)
+        logger.info(f"[LAYOUT v4.6] Anchos de columna: {table_col_widths}")
+
+    # =========================================================================
     # Construir salida con columnas detectadas por DBSCAN
     # =========================================================================
     output_lines = []
@@ -2638,11 +2838,29 @@ def format_text_with_layout(text_blocks, coordinates, page_width=200, use_dbscan
     num_columns = len(columns) if columns else 1
     col_char_width = page_width // num_columns if num_columns > 0 else page_width
 
-    for row in rows:
+    for row_idx, row in enumerate(rows):
         # Ordenar bloques de la fila por X (izquierda a derecha)
         row_sorted = sorted(row, key=lambda b: b['x_min'])
 
-        if use_dbscan and len(columns) > 1:
+        # =====================================================================
+        # v4.6: FORMATEO DE TABLA si esta fila es parte de una tabla detectada
+        # =====================================================================
+        is_table_row = table_info['is_table'] and (
+            row_idx == table_info['header_row_idx'] or
+            row_idx in table_info['data_rows']
+        )
+
+        if is_table_row and table_info['columns'] and table_col_widths:
+            # Usar formateo de tabla con separadores
+            table_line = format_table_row(row_sorted, table_info['columns'], page_width, table_col_widths)
+            output_lines.append(table_line)
+
+            # Añadir separador después del header
+            if row_idx == table_info['header_row_idx']:
+                separator = format_table_separator(table_col_widths)
+                output_lines.append(separator)
+
+        elif use_dbscan and len(columns) > 1:
             # Modo DBSCAN: Posicionar bloques en sus columnas correspondientes
             line = [' '] * page_width
 
