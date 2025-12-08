@@ -2567,11 +2567,31 @@ def detect_table_structure(blocks, rows):
                 matches += 1
         header_matches_per_row.append((row_idx, matches, row_text[:80]))
 
+    # v4.7.1: Patrones que indican sección de TOTALES, NO tabla de productos
+    TOTALS_SECTION_PATTERNS = [
+        r'(?i)\bbase\s*imponible\b',
+        r'(?i)\b%\s*iva\b',
+        r'(?i)\bcuota\s*(iva|imponible)?\b',
+        r'(?i)\btotal\s*factura\b',
+        r'(?i)\bimporte\s*total\b',
+        r'(?i)\brecargo\b',
+    ]
+
     # La fila con más matches de headers (mínimo 3)
     best_header = max(header_matches_per_row, key=lambda x: x[1])
     if best_header[1] >= 3:
-        result['header_row_idx'] = best_header[0]
-        logger.info(f"[TABLE-DETECT] Header detectado en fila {best_header[0]}: {best_header[2]}")
+        header_text = best_header[2]
+        # v4.7.1: Verificar que NO sea una línea de totales disfrazada de header
+        is_totals_section = False
+        for totals_pattern in TOTALS_SECTION_PATTERNS:
+            if re.search(totals_pattern, header_text, re.IGNORECASE):
+                is_totals_section = True
+                logger.info(f"[TABLE-DETECT] Header descartado (es sección de totales): {header_text}")
+                break
+
+        if not is_totals_section:
+            result['header_row_idx'] = best_header[0]
+            logger.info(f"[TABLE-DETECT] Header detectado en fila {best_header[0]}: {best_header[2]}")
 
     # Buscar filas de datos (tienen precios) - pero parar en patrones de cierre
     table_ended = False
@@ -2605,8 +2625,21 @@ def detect_table_structure(blocks, rows):
                 logger.info(f"[TABLE-DETECT] Fin de tabla (línea de totales) en fila {row_idx}: {row_text[:50]}")
                 break
 
-        if len(prices) >= 1:  # Al menos 1 precio = probable línea de producto (relajado de 2)
-            result['data_rows'].append(row_idx)
+        # v4.7.1: Verificar que la fila tenga contenido de producto
+        if len(prices) >= 1:
+            # Verificar que hay algo de texto descriptivo además de los precios
+            text_without_prices = re.sub(PRICE_PATTERN, '', row_text)
+            text_without_numbers = re.sub(r'[\d\s\.,€$%\|\-\+]+', '', text_without_prices)
+
+            # Si hay texto descriptivo = definitivamente fila de producto
+            if len(text_without_numbers) >= 4:
+                result['data_rows'].append(row_idx)
+            # Si tiene exactamente 3 precios (qty, precio, total) y está cerca del header = fila de datos
+            elif len(prices) == 3 and result['header_row_idx'] >= 0 and row_idx - result['header_row_idx'] <= 20:
+                result['data_rows'].append(row_idx)
+            # Si tiene 4+ precios sin texto = probable línea de totales, descartar
+            else:
+                logger.info(f"[TABLE-DETECT] Fila {row_idx} descartada (solo precios, sin descripción): {row_text[:50]}")
 
     result['is_table'] = result['header_row_idx'] >= 0 and len(result['data_rows']) >= 1  # Relajado de 2
 
