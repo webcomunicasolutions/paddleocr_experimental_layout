@@ -2482,15 +2482,29 @@ def detect_columns_dbscan(x_positions, eps_factor=0.05):
 # DETECCIÓN DE TABLAS v4.6 - Para formateo mejorado de productos/line_items
 # =========================================================================
 
-# Patrones de headers de tabla comunes en facturas españolas
+# Patrones de headers de tabla - Multi-idioma (ES, EN, DE, FR, PT)
+# v4.7: Ampliado para facturas internacionales y más formatos españoles
 TABLE_HEADER_PATTERNS = [
-    r'(?i)(c[oó]digo|art[ií]culo|ref\.?)',
-    r'(?i)(descripci[oó]n|concepto|detalle|producto)',
-    r'(?i)(cantidad|cant\.?|uds\.?|unid\.?)',
-    r'(?i)(precio|p\.?u\.?|pvp|valor)',
-    r'(?i)(dto\.?|desc\.?|descuento)',
-    r'(?i)(importe|total|neto|subtotal)',
-    r'(?i)(iva|%)',
+    # Código/Referencia - ES, EN, DE, FR, PT
+    r'(?i)\b(c[oó]digo|art[ií]culo|ref\.?|sku|item|artikel|référence|referência)\b',
+    # Descripción - ES, EN, DE, FR, PT
+    r'(?i)\b(descripci[oó]n|concepto|detalle|producto|description|bezeichnung|désignation|descrição)\b',
+    # Cantidad - ES, EN, DE, FR, PT
+    r'(?i)\b(cantidad|cant\.?|uds\.?|unid\.?|qty|quantity|menge|quantité|quantidade)\b',
+    # Precio - ES, EN, DE, FR, PT
+    r'(?i)\b(precio|p\.?u\.?|pvp|valor|price|unit\s*price|preis|prix|preço)\b',
+    # Descuento - ES, EN, DE, FR, PT
+    r'(?i)\b(dto\.?|desc\.?|descuento|discount|rabatt|remise|desconto)\b',
+    # Importe/Total - ES, EN, DE, FR, PT
+    r'(?i)\b(importe|total|neto|subtotal|amount|betrag|montant|valor)\b',
+    # IVA/Tax - ES, EN, DE, FR, PT
+    r'(?i)\b(iva|%\s*iva|tax|vat|mwst|tva|imposto)\b',
+    # Servicios específicos (renting, suscripciones)
+    r'(?i)\b(servicios?|contratados?|periodo|period|services?|leistung)\b',
+    # Matrícula/Vehículos (para facturas de renting)
+    r'(?i)\b(matr[ií]cula|veh[ií]culo|modelo|model|license\s*plate)\b',
+    # Conductor/Usuario (para facturas de renting/servicios)
+    r'(?i)\b(conductor|usuario|user|driver|fahrer|utilisateur)\b',
 ]
 
 # Patrón para detectar líneas de producto (tienen precios)
@@ -2522,14 +2536,25 @@ def detect_table_structure(blocks, rows):
     if not rows or len(rows) < 3:
         return result
 
-    # Patrones que indican FIN de la tabla de productos
+    # Patrones que indican FIN de la tabla de productos - Multi-idioma
+    # v4.7: Ampliado para facturas internacionales
     END_TABLE_PATTERNS = [
-        r'(?i)(forma\s*de\s*pago|vencimiento|total\s*factura)',
-        r'(?i)(base\s*imponible|baseimponible|subtotal|importe\s*total)',
-        r'(?i)(iva\s*\d+|%\s*iva|cuota|recargo|descuento\s*total)',
-        r'(?i)(garantia|garant[ií]a|registro|domicilio\s*social)',
-        r'(?i)(banco|c\.?c\.?c\.?|iban)',
-        r'(?i)(total\s*en\s*eur|total\s*eur|total\s*€)',  # Para facturas internacionales
+        # Forma de pago / Payment - ES, EN, DE, FR, PT (vencimiento solo si está al inicio de línea)
+        r'(?i)(forma\s*de\s*pago|^vencimiento|fecha\s*de\s*vencimiento|total\s*factura|payment\s*method|zahlungsart|mode\s*de\s*paiement)',
+        # Base imponible / Tax base - ES, EN, DE, FR, PT
+        r'(?i)(base\s*imponible|baseimponible|subtotal|importe\s*total|tax\s*base|nettobetrag|base\s*imposable)',
+        # IVA/Tax totals - ES, EN, DE, FR, PT (cuota solo si va con IVA/imponible, no "Cuota de Renting")
+        r'(?i)(iva\s*\d+|%\s*iva|cuota\s*(iva|imponible)|recargo\s*equivalencia|descuento\s*total|vat\s*amount|mwst\s*betrag|montant\s*tva)',
+        # Garantía/Legal - ES, EN, DE, FR, PT
+        r'(?i)(garantia|garant[ií]a|registro|domicilio\s*social|warranty|garantie|gewährleistung)',
+        # Banco/Bank - ES, EN, DE, FR, PT
+        r'(?i)(banco|c\.?c\.?c\.?|iban|bank\s*account|bankverbindung|compte\s*bancaire)',
+        # Total en moneda - ES, EN, DE, FR, PT
+        r'(?i)(total\s*en\s*eur|total\s*eur|total\s*€|total\s*usd|total\s*gbp|total\s*amount|gesamtbetrag|montant\s*total)',
+        # Transacciones/Balance - EN, ES
+        r'(?i)(transacci[oó]n|transacciones|transactions?|balance|saldo)',
+        # Cuadro resumen - ES
+        r'(?i)(cuadro\s*resumen|resumen\s*factura|invoice\s*summary)',
     ]
 
     # Buscar fila de headers
@@ -2568,6 +2593,18 @@ def detect_table_structure(blocks, rows):
 
         # Contar patrones de precio en la fila
         prices = PRICE_PATTERN.findall(row_text)
+
+        # Verificar si es línea de totales: 4+ precios con poco texto (base, %iva, cuota, total)
+        # NO aplicar a 3 precios porque puede ser qty/precio/total de producto
+        if len(prices) >= 4:
+            # Calcular ratio texto/precios - líneas de totales tienen poco texto
+            text_without_prices = re.sub(r'\d+[,\.]\d{2}', '', row_text)
+            text_clean = re.sub(r'[\s\.,€$%]+', '', text_without_prices)
+            if len(text_clean) < 15:  # Muy poco texto = probable línea de totales
+                table_ended = True
+                logger.info(f"[TABLE-DETECT] Fin de tabla (línea de totales) en fila {row_idx}: {row_text[:50]}")
+                break
+
         if len(prices) >= 1:  # Al menos 1 precio = probable línea de producto (relajado de 2)
             result['data_rows'].append(row_idx)
 
