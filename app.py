@@ -11,7 +11,7 @@ DEBUG MODE: Logging extensivo para diagnosticar problemas de arranque
 # =============================================================================
 # VERSION
 # =============================================================================
-VERSION = "4.7.3"
+VERSION = "4.6.1-stable"
 
 import os
 import sys
@@ -2488,65 +2488,20 @@ def detect_columns_dbscan(x_positions, eps_factor=0.05):
 # DETECCIÓN DE TABLAS v4.6 - Para formateo mejorado de productos/line_items
 # =========================================================================
 
-# Patrones de headers de tabla - Multi-idioma (ES, EN, DE, FR, PT)
-# v4.7: Ampliado para facturas internacionales y más formatos españoles
+# Patrones de headers de tabla comunes en facturas españolas
 TABLE_HEADER_PATTERNS = [
-    # Código/Referencia - ES, EN, DE, FR, PT
-    r'(?i)\b(c[oó]digo|art[ií]culo|ref\.?|sku|item|artikel|référence|referência)\b',
-    # Descripción - ES, EN, DE, FR, PT
-    r'(?i)\b(descripci[oó]n|concepto|detalle|producto|description|bezeichnung|désignation|descrição)\b',
-    # Cantidad - ES, EN, DE, FR, PT
-    r'(?i)\b(cantidad|cant\.?|uds\.?|unid\.?|qty|quantity|menge|quantité|quantidade)\b',
-    # Precio - ES, EN, DE, FR, PT
-    r'(?i)\b(precio|p\.?u\.?|pvp|valor|price|unit\s*price|preis|prix|preço)\b',
-    # Descuento - ES, EN, DE, FR, PT
-    r'(?i)\b(dto\.?|desc\.?|descuento|discount|rabatt|remise|desconto)\b',
-    # Importe/Total - ES, EN, DE, FR, PT
-    r'(?i)\b(importe|total|neto|subtotal|amount|betrag|montant|valor)\b',
-    # IVA/Tax - ES, EN, DE, FR, PT
-    r'(?i)\b(iva|%\s*iva|tax|vat|mwst|tva|imposto)\b',
-    # Servicios específicos (renting, suscripciones)
-    r'(?i)\b(servicios?|contratados?|periodo|period|services?|leistung)\b',
-    # Matrícula/Vehículos (para facturas de renting)
-    r'(?i)\b(matr[ií]cula|veh[ií]culo|modelo|model|license\s*plate)\b',
-    # Conductor/Usuario (para facturas de renting/servicios)
-    r'(?i)\b(conductor|usuario|user|driver|fahrer|utilisateur)\b',
+    r'(?i)(c[oó]digo|art[ií]culo|ref\.?)',
+    r'(?i)(descripci[oó]n|concepto|detalle|producto)',
+    r'(?i)(cantidad|cant\.?|uds\.?|unid\.?)',
+    r'(?i)(precio|p\.?u\.?|pvp|valor)',
+    r'(?i)(dto\.?|desc\.?|descuento)',
+    r'(?i)(importe|total|neto|subtotal)',
+    r'(?i)(iva|%)',
 ]
 
 # Patrón para detectar líneas de producto (tienen precios)
 PRICE_PATTERN = re.compile(r'\d+[,\.]\d{2}')
 QUANTITY_PATTERN = re.compile(r'^\d+$|^\d+[,\.]\d+$')
-
-# Patrones que indican FIN de la tabla de productos - Multi-idioma
-# v4.7: Ampliado para facturas internacionales
-END_TABLE_PATTERNS = [
-    # Forma de pago / Payment - ES, EN, DE, FR, PT (vencimiento solo si está al inicio de línea)
-    r'(?i)(forma\s*de\s*pago|^vencimiento|fecha\s*de\s*vencimiento|total\s*factura|payment\s*method|zahlungsart|mode\s*de\s*paiement)',
-    # Base imponible / Tax base - ES, EN, DE, FR, PT
-    r'(?i)(base\s*imponible|baseimponible|subtotal|importe\s*total|tax\s*base|nettobetrag|base\s*imposable)',
-    # IVA/Tax totals - ES, EN, DE, FR, PT (cuota solo si va con IVA/imponible, no "Cuota de Renting")
-    r'(?i)(iva\s*\d+|%\s*iva|cuota\s*(iva|imponible)|recargo\s*equivalencia|descuento\s*total|vat\s*amount|mwst\s*betrag|montant\s*tva)',
-    # Garantía/Legal - ES, EN, DE, FR, PT
-    r'(?i)(garantia|garant[ií]a|registro|domicilio\s*social|warranty|garantie|gewährleistung)',
-    # Banco/Bank - ES, EN, DE, FR, PT
-    r'(?i)(banco|c\.?c\.?c\.?|iban|bank\s*account|bankverbindung|compte\s*bancaire)',
-    # Total en moneda - ES, EN, DE, FR, PT
-    r'(?i)(total\s*en\s*eur|total\s*eur|total\s*€|total\s*usd|total\s*gbp|total\s*amount|gesamtbetrag|montant\s*total)',
-    # Transacciones/Balance - EN, ES
-    r'(?i)(transacci[oó]n|transacciones|transactions?|balance|saldo)',
-    # Cuadro resumen - ES
-    r'(?i)(cuadro\s*resumen|resumen\s*factura|invoice\s*summary)',
-]
-
-# v4.7.1: Patrones que indican sección de TOTALES, NO tabla de productos
-TOTALS_SECTION_PATTERNS = [
-    r'(?i)\bbase\s*imponible\b',
-    r'(?i)\b%\s*iva\b',
-    r'(?i)\bcuota\s*(iva|imponible)?\b',
-    r'(?i)\btotal\s*factura\b',
-    r'(?i)\bimporte\s*total\b',
-    r'(?i)\brecargo\b',
-]
 
 
 def detect_table_structure(blocks, rows):
@@ -2573,6 +2528,16 @@ def detect_table_structure(blocks, rows):
     if not rows or len(rows) < 3:
         return result
 
+    # Patrones que indican FIN de la tabla de productos
+    END_TABLE_PATTERNS = [
+        r'(?i)(forma\s*de\s*pago|vencimiento|total\s*factura)',
+        r'(?i)(base\s*imponible|baseimponible|subtotal|importe\s*total)',
+        r'(?i)(iva\s*\d+|%\s*iva|cuota|recargo|descuento\s*total)',
+        r'(?i)(garantia|garant[ií]a|registro|domicilio\s*social)',
+        r'(?i)(banco|c\.?c\.?c\.?|iban)',
+        r'(?i)(total\s*en\s*eur|total\s*eur|total\s*€)',  # Para facturas internacionales
+    ]
+
     # Buscar fila de headers
     header_matches_per_row = []
     for row_idx, row in enumerate(rows):
@@ -2586,18 +2551,8 @@ def detect_table_structure(blocks, rows):
     # La fila con más matches de headers (mínimo 3)
     best_header = max(header_matches_per_row, key=lambda x: x[1])
     if best_header[1] >= 3:
-        header_text = best_header[2]
-        # v4.7.1: Verificar que NO sea una línea de totales disfrazada de header
-        is_totals_section = False
-        for totals_pattern in TOTALS_SECTION_PATTERNS:
-            if re.search(totals_pattern, header_text, re.IGNORECASE):
-                is_totals_section = True
-                logger.info(f"[TABLE-DETECT] Header descartado (es sección de totales): {header_text}")
-                break
-
-        if not is_totals_section:
-            result['header_row_idx'] = best_header[0]
-            logger.info(f"[TABLE-DETECT] Header detectado en fila {best_header[0]}: {best_header[2]}")
+        result['header_row_idx'] = best_header[0]
+        logger.info(f"[TABLE-DETECT] Header detectado en fila {best_header[0]}: {best_header[2]}")
 
     # Buscar filas de datos (tienen precios) - pero parar en patrones de cierre
     table_ended = False
@@ -2619,33 +2574,8 @@ def detect_table_structure(blocks, rows):
 
         # Contar patrones de precio en la fila
         prices = PRICE_PATTERN.findall(row_text)
-
-        # Verificar si es línea de totales: 4+ precios con poco texto (base, %iva, cuota, total)
-        # NO aplicar a 3 precios porque puede ser qty/precio/total de producto
-        if len(prices) >= 4:
-            # Calcular ratio texto/precios - líneas de totales tienen poco texto
-            text_without_prices = re.sub(r'\d+[,\.]\d{2}', '', row_text)
-            text_clean = re.sub(r'[\s\.,€$%]+', '', text_without_prices)
-            if len(text_clean) < 15:  # Muy poco texto = probable línea de totales
-                table_ended = True
-                logger.info(f"[TABLE-DETECT] Fin de tabla (línea de totales) en fila {row_idx}: {row_text[:50]}")
-                break
-
-        # v4.7.1: Verificar que la fila tenga contenido de producto
-        if len(prices) >= 1:
-            # Verificar que hay algo de texto descriptivo además de los precios
-            text_without_prices = re.sub(PRICE_PATTERN, '', row_text)
-            text_without_numbers = re.sub(r'[\d\s\.,€$%\|\-\+]+', '', text_without_prices)
-
-            # Si hay texto descriptivo = definitivamente fila de producto
-            if len(text_without_numbers) >= 4:
-                result['data_rows'].append(row_idx)
-            # Si tiene exactamente 3 precios (qty, precio, total) y está cerca del header = fila de datos
-            elif len(prices) == 3 and result['header_row_idx'] >= 0 and row_idx - result['header_row_idx'] <= 20:
-                result['data_rows'].append(row_idx)
-            # Si tiene 4+ precios sin texto = probable línea de totales, descartar
-            else:
-                logger.info(f"[TABLE-DETECT] Fila {row_idx} descartada (solo precios, sin descripción): {row_text[:50]}")
+        if len(prices) >= 1:  # Al menos 1 precio = probable línea de producto (relajado de 2)
+            result['data_rows'].append(row_idx)
 
     result['is_table'] = result['header_row_idx'] >= 0 and len(result['data_rows']) >= 1  # Relajado de 2
 
@@ -2742,180 +2672,6 @@ def format_table_row(row_blocks, column_positions, page_width=200, col_widths=No
 def format_table_separator(col_widths):
     """Genera una línea separadora para la tabla."""
     return '+' + '+'.join(['-' * w for w in col_widths]) + '+'
-
-
-def add_pipes_to_pdftotext(text, min_columns=3):
-    """
-    Añade pipes a tablas detectadas en texto de pdftotext -layout.
-    v4.8: Formateo de tablas para PDFs vectoriales.
-
-    Esta función analiza texto con layout espacial (de pdftotext -layout)
-    y detecta tablas basándose en:
-    1. Headers con patrones conocidos (TABLE_HEADER_PATTERNS)
-    2. Columnas detectadas por posición de texto
-    3. Filas de datos con precios
-
-    Args:
-        text: Texto con layout espacial de pdftotext
-        min_columns: Mínimo de columnas para considerar una tabla
-
-    Returns:
-        Texto con tablas formateadas usando pipes |
-    """
-    if not text:
-        return text
-
-    lines = text.split('\n')
-    output_lines = []
-    in_table = False
-    table_columns = []  # Lista de (start_pos, end_pos) para cada columna
-    header_line_idx = -1
-
-    for line_idx, line in enumerate(lines):
-        # Detectar header de tabla usando patrones existentes
-        if not in_table:
-            header_matches = 0
-            for pattern in TABLE_HEADER_PATTERNS:
-                if re.search(pattern, line, re.IGNORECASE):
-                    header_matches += 1
-
-            # Si tiene 3+ matches de header patterns, es probablemente un header de tabla
-            if header_matches >= 3:
-                # Verificar que NO sea sección de totales
-                is_totals = False
-                for totals_pattern in TOTALS_SECTION_PATTERNS:
-                    if re.search(totals_pattern, line, re.IGNORECASE):
-                        is_totals = True
-                        break
-
-                if not is_totals:
-                    # Detectar columnas basándose en grupos de espacios
-                    table_columns = detect_columns_from_layout(line)
-
-                    if len(table_columns) >= min_columns:
-                        in_table = True
-                        header_line_idx = line_idx
-                        logger.info(f"[PIPES] Header detectado en línea {line_idx}: {len(table_columns)} columnas")
-
-                        # Formatear header con pipes
-                        formatted_header = format_line_with_pipes(line, table_columns)
-                        output_lines.append(formatted_header)
-
-                        # Añadir separador después del header
-                        col_widths = [end - start for start, end in table_columns]
-                        separator = '+' + '+'.join(['-' * max(w, 8) for w in col_widths]) + '+'
-                        output_lines.append(separator)
-                        continue
-
-        # Si estamos en una tabla, formatear filas de datos
-        if in_table:
-            # Verificar fin de tabla
-            end_table = False
-
-            # Patrones de fin de tabla (prioridad alta)
-            for end_pattern in END_TABLE_PATTERNS:
-                if re.search(end_pattern, line, re.IGNORECASE):
-                    end_table = True
-                    logger.info(f"[PIPES] Fin de tabla en línea {line_idx}")
-                    break
-
-            # Muchas líneas después del header = fin de tabla
-            if line_idx - header_line_idx > 25:
-                end_table = True
-
-            if end_table:
-                in_table = False
-                table_columns = []
-                output_lines.append(line)
-                continue
-
-            # Formatear línea si tiene contenido
-            if line.strip():
-                # Formatear línea de datos con pipes
-                formatted_line = format_line_with_pipes(line, table_columns)
-                output_lines.append(formatted_line)
-            else:
-                # Línea vacía dentro de tabla - mantener sin pipes
-                output_lines.append(line)
-        else:
-            output_lines.append(line)
-
-    return '\n'.join(output_lines)
-
-
-def detect_columns_from_layout(line):
-    """
-    Detecta posiciones de columnas basándose en el layout del texto.
-    Busca grupos de 2+ espacios consecutivos como separadores de columna.
-
-    Returns:
-        Lista de tuplas (start_pos, end_pos) para cada columna detectada
-    """
-    if not line or len(line.strip()) < 10:
-        return []
-
-    columns = []
-    in_text = False
-    col_start = 0
-
-    i = 0
-    while i < len(line):
-        char = line[i]
-
-        if char != ' ':
-            if not in_text:
-                col_start = i
-                in_text = True
-        else:
-            # Contar espacios consecutivos
-            space_count = 0
-            j = i
-            while j < len(line) and line[j] == ' ':
-                space_count += 1
-                j += 1
-
-            # 2+ espacios = separador de columna
-            if space_count >= 2 and in_text:
-                columns.append((col_start, i))
-                in_text = False
-                i = j - 1  # Saltar los espacios
-
-        i += 1
-
-    # Última columna
-    if in_text:
-        columns.append((col_start, len(line)))
-
-    return columns
-
-
-def format_line_with_pipes(line, columns):
-    """
-    Formatea una línea de texto usando las posiciones de columna detectadas.
-
-    Args:
-        line: Línea de texto original
-        columns: Lista de (start_pos, end_pos) de columnas
-
-    Returns:
-        Línea formateada con pipes |
-    """
-    if not columns:
-        return line
-
-    parts = []
-    for start, end in columns:
-        # Extraer texto de la columna
-        if start < len(line):
-            col_text = line[start:min(end, len(line))].strip()
-        else:
-            col_text = ''
-
-        # Ancho mínimo de columna
-        col_width = max(end - start, 8)
-        parts.append(col_text.ljust(col_width))
-
-    return '|' + '|'.join(parts) + '|'
 
 
 def format_text_with_layout(text_blocks, coordinates, page_width=200, use_dbscan=True):
@@ -3362,8 +3118,7 @@ def dashboard():
                     <div class="format-selector">
                         <strong>Formato de salida:</strong><br><br>
                         <label><input type="radio" name="format" value="normal" checked> Normal (texto plano)</label>
-                        <label><input type="radio" name="format" value="layout"> Layout (estructura espacial)</label>
-                        <label><input type="radio" name="format" value="layout_pipes"> Layout + Pipes (tablas con |)</label>
+                        <label><input type="radio" name="format" value="layout"> Layout (mantiene estructura espacial)</label>
                     </div>
 
                     <button type="submit" class="btn btn-primary" id="submitBtn">Procesar OCR</button>
@@ -4365,7 +4120,7 @@ def process():
         # Obtener parámetros
         language = request.form.get('language', 'es')
         detailed = request.form.get('detailed', 'false').lower() == 'true'
-        output_format = request.form.get('format', 'normal')  # normal, layout o layout_pipes
+        output_format = request.form.get('format', 'normal')  # normal o layout
         original_filename = file.filename  # Guardar nombre original para historial
 
         # Guardar archivo temporal en /home/n8n/in para compatibilidad con /ocr
@@ -4429,35 +4184,7 @@ def process():
             stats = response_json.get('stats', {})
 
             # Aplicar formato según selección del usuario
-            if output_format == 'layout_pipes':
-                # Layout Pipes: Formateo de tablas con pipes para IAs
-                # Estrategia híbrida:
-                # - PDFs vectoriales: pdftotext + add_pipes_to_pdftotext()
-                # - PDFs escaneados: format_text_with_layout() con coordenadas OCR
-
-                pdftotext_chars = len(extracted_text_layout.strip()) if extracted_text_layout else 0
-                ocr_blocks_count = len(ocr_blocks) if ocr_blocks else 0
-
-                # Heurística: PDF vectorial si pdftotext tiene mucho más contenido
-                is_vectorial = pdftotext_chars > 500 and (ocr_blocks_count < 50 or pdftotext_chars > ocr_blocks_count * 30)
-
-                if is_vectorial and extracted_text_layout:
-                    # PDF vectorial: usar pdftotext y añadir pipes a tablas detectadas
-                    formatted_text = add_pipes_to_pdftotext(extracted_text_layout)
-                    logger.info(f"[PROCESS] Modo Layout Pipes (pdftotext + pipes) - {pdftotext_chars} chars, {ocr_blocks_count} bloques OCR")
-                elif ocr_blocks and coordinates and len(coordinates) > 0:
-                    # PDF escaneado: usar coordenadas OCR con formateo de tablas
-                    formatted_text = format_text_with_layout(ocr_blocks, coordinates, page_width=200)
-                    logger.info(f"[PROCESS] Modo Layout Pipes (coordenadas OCR) - {len(ocr_blocks)} bloques, {len(coordinates)} coords")
-                elif extracted_text_layout:
-                    # Fallback: pdftotext con pipes
-                    formatted_text = add_pipes_to_pdftotext(extracted_text_layout)
-                    logger.info(f"[PROCESS] Modo Layout Pipes (fallback pdftotext + pipes) - {len(formatted_text)} chars")
-                else:
-                    formatted_text = extracted_text_plain
-                    logger.info(f"[PROCESS] Modo Layout Pipes fallback a texto plano")
-
-            elif output_format == 'layout':
+            if output_format == 'layout':
                 # Layout: Estrategia híbrida inteligente
                 #
                 # PDFs vectoriales (facturas digitales): pdftotext -layout funciona mejor
